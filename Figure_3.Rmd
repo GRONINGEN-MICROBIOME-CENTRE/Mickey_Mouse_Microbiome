@@ -1,0 +1,957 @@
+---
+title: "Figure 3"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+# CODE_DIR: root of this repository, one level above this notebook.
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+CODE_DIR <- normalizePath("..")
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(tibble)
+library(lme4)
+library(vegan)
+library(readxl)
+library(ggplot2)
+library(tidyverse)
+library(stringr)
+library(RColorBrewer)
+library(wesanderson)
+library(ggrepel)
+library(mgcv) 
+library(reshape2)
+library(vtable)
+library(ggpubr)
+library(lmerTest)
+library(reshape2)
+library(EnvStats)
+library(foreach)
+library(ggExtra)
+library(plotly)
+library(openxlsx)
+library(readr)
+library(viridis)
+library(reshape2)
+library(pheatmap)
+library(forcats)
+
+select    <- dplyr::select
+filter    <- dplyr::filter
+mutate    <- dplyr::mutate
+summarise <- dplyr::summarise
+arrange   <- dplyr::arrange
+rename    <- dplyr::rename
+group_by  <- dplyr::group_by
+count     <- dplyr::count
+```
+
+```{r}
+# LEGEND NUMBERS helper: prints to console and appends to one text file.
+LEGEND_FILE <- "Figure3_legend_numbers.txt"
+cat("Figure 3 - legend numbers\nGenerated: ", format(Sys.time()), "\n",
+    file = LEGEND_FILE, sep = "")
+legend_out <- function(title, x = NULL) {
+  body <- if (is.null(x)) character(0) else if (is.character(x)) x
+          else utils::capture.output(print(as.data.frame(x), row.names = FALSE))
+  txt <- c("", paste0("=== ", title, " ==="), body)
+  cat(txt, sep = "\n"); cat(txt, sep = "\n", file = LEGEND_FILE, append = TRUE)
+  invisible(NULL)
+}
+n_si <- function(df, ..., id = "MM_ID") {
+  df %>% dplyr::group_by(...) %>%
+    dplyr::summarise(n_samples = dplyr::n(),
+                     n_infants = dplyr::n_distinct(.data[[id]]), .groups = "drop")
+}
+```
+
+```{r}
+#PRE-NEC
+
+# Load the data
+metadata <- read.delim("metadata_cleaned_april.txt")
+taxa_cleaned <- read.delim("taxa_cleaned_jan.txt")
+row.names(taxa_cleaned)<-taxa_cleaned$ID
+taxa_cleaned$ID=NULL
+row.names(metadata)<-metadata$ID
+metadata_infant <- metadata[grep("^B", rownames(metadata)), ]
+taxa_infant <- taxa_cleaned[grep("^B", rownames(taxa_cleaned)), ]
+# Factors (categorical/binary variables)
+factor_vars <- c("prolonged_rupt", "surgery", "ab48", "multiple", "delivery_md",
+                 "maternal_atb", "mother_st_com", "placenta_ab", "pe_hellp",
+                 "maternal_infect", "mother_b_hem", "nec",
+                 "sex", "sip", "sepsis_culture", "pda_sign", "mortality",
+                 "pda", "probiotics", "SGA", "LGA", "FGR", "ivh", "abtx")
+# Numeric (continuous variables)
+numeric_vars <- c("mmpercentage", "probiotic_sample","apgar_1", "apgar_5", "antibiotic_sample", "ga_exact", "bw", "admissiontime", "tpn_days", "TFEF_B", "TFEF", "DNA_conc","Clean_reads_P1", "week", "Postnatal_Age", "MM_ID" )
+# Apply to dataframe
+metadata_infant[factor_vars] <- lapply(metadata_infant[factor_vars], as.factor)
+metadata_infant[numeric_vars] <- lapply(metadata_infant[numeric_vars], as.numeric)
+# Verify
+str(metadata_infant[, c(factor_vars, numeric_vars)])
+
+# --- Restrict to pre-NEC samples ----------------------------------------
+# Ensure nec_timing is numeric before comparison
+metadata_infant$nec_timing <- metadata_infant$necpostnatal - metadata_infant$Postnatal_Age
+metadata_infant$nec_timing <- as.numeric(as.character(metadata_infant$nec_timing))
+
+# Classify each sample relative to NEC onset
+# (case_when is order-sensitive: nec_timing == 0 falls into "pre_NEC")
+metadata_infant$nec_stage <- case_when(
+  metadata_infant$nec_timing >= 0   ~ "pre_NEC",
+  metadata_infant$nec_timing <= 0   ~ "post_NEC",
+  is.na(metadata_infant$nec_timing) ~ "no_NEC"
+)
+
+legend_out("All infant samples by NEC stage (before removing post-NEC samples)",
+           metadata_infant %>% n_si(nec_stage))
+legend_out("Check: nec = 1 without an onset day (would be counted as no_NEC)",
+           as.character(sum(metadata_infant$nec == "1" &
+                              is.na(metadata_infant$necpostnatal))))
+legend_out("Samples taken on the day of NEC onset (counted as pre-NEC)",
+           as.character(sum(metadata_infant$nec_timing == 0, na.rm = TRUE)))
+
+# Drop post-NEC samples; keep pre-onset + never-NEC controls
+metadata_infant <- metadata_infant[metadata_infant$nec_stage %in% c("pre_NEC", "no_NEC"), ]
+
+cat("Samples after NEC-stage filter:\n"); print(table(metadata_infant$nec_stage))
+# ------------------------------------------------------------------------
+
+taxa=taxa_infant[row.names(taxa_infant)%in% rownames(metadata_infant),] # Only taxa present in infants 
+setdiff (rownames(taxa), rownames(metadata_infant)) # all good 
+taxa_sp=taxa
+taxa_sp=taxa_sp[,grep("s__",colnames(taxa_sp))]
+taxa_sp=taxa_sp[,-grep("t__",colnames(taxa_sp))]
+taxa_sub_species<-taxa[,grep("t__",colnames(taxa))]
+taxa_genus=taxa
+taxa_genus=taxa_genus[,grep("g__",colnames(taxa_genus))]
+taxa_genus=taxa_genus[,-grep("s__",colnames(taxa_genus))]
+#Simplify names
+colnames(taxa_sp)=gsub(".*s__","",colnames(taxa_sp))
+colnames(taxa_sub_species)=gsub(".*t__","",colnames(taxa_sub_species))
+colnames(taxa_genus)=gsub(".*g__","",colnames(taxa_genus))
+taxa_sp$Bifidobacterium_longum=NULL
+taxa_sp$Bifidobacterium_animalis=NULL
+taxa_sp$Streptococcus_thermophilus=NULL
+taxa_sp <- taxa_sp %>% mutate(across(everything(), ~ as.numeric(.)))
+taxa_sub_species <- taxa_sub_species %>% mutate(across(everything(), ~ as.numeric(.)))
+richness <- plyr::ddply(taxa_sp,~rownames(taxa_sp),function(x) {
+  data.frame(RICHNESS=sum(x[-1]>0, na.rm = T))})
+row.names(richness)<-richness$`rownames(taxa_sp)`
+richness$`rownames(taxa_sp)`=NULL
+my_alpha_diversity=data.frame(Shannon=diversity(taxa_sp, index = "shannon"), Simpson=diversity(taxa_sp, index = "simpson"))
+my_alpha_diversity=merge(my_alpha_diversity, richness, by="row.names")
+row.names(my_alpha_diversity)=my_alpha_diversity$Row.names
+my_alpha_diversity$Row.names=NULL
+phenos_imputed_div=merge(my_alpha_diversity, metadata_infant, by="row.names")
+row.names(phenos_imputed_div)=phenos_imputed_div$Row.names
+phenos_imputed_div$Row.names=NULL
+taxa_sp$ID<-row.names(taxa_sp)
+taxa_sp$personal_ID<-sub ("_.*",  "",  taxa_sp$ID)
+unique_counts <- sapply(taxa_sp, function(x) length(unique(taxa_sp$personal_ID[x >0.05]))) 
+taxa_sp_filt <- taxa_sp[, unique_counts >= 1]  
+taxa_sp_filt$personal_ID=NULL
+taxa_sp_filt$ID=NULL
+#CLR Transformations
+my_pseudocount_normal=min(taxa_sp_filt[taxa_sp_filt!=0])/2
+# Align the taxa table to the phenotype table by row name.
+stopifnot(setequal(row.names(taxa_sp_filt), row.names(phenos_imputed_div)))
+taxa_sp_filt <- taxa_sp_filt[row.names(phenos_imputed_div), , drop = FALSE]
+my_distance_CLR=vegdist(taxa_sp_filt, method = "aitchison", pseudocount=my_pseudocount_normal) 
+taxa_sp_filt_CLR <- decostand(taxa_sp_filt, "clr", pseudocount=my_pseudocount_normal)
+mypcoa_CLR=cmdscale(my_distance_CLR, k = 20, eig = T)
+my_var_CLR=round(mypcoa_CLR$eig*100/sum(mypcoa_CLR$eig),2)[1:20]
+barplot (my_var_CLR)
+mypcoa_df_CLR=as.data.frame(mypcoa_CLR$points)
+names(mypcoa_df_CLR) <- c('PC1','PC2','PC3','PC4','PC5', 'PC6','PC7','PC8','PC9','PC10',
+                          'PC11','PC12','PC13','PC14','PC15', 'PC16','PC17','PC18','PC19','PC20')
+phenos_imputed_div_pc_CLR=merge(mypcoa_df_CLR,phenos_imputed_div, by="row.names")
+row.names (phenos_imputed_div_pc_CLR)<-phenos_imputed_div_pc_CLR$Row.names
+
+legend_out("Analysed samples (post-NEC removed) by NEC status",
+           phenos_imputed_div %>% n_si(nec))
+legend_out("Pre-NEC samples: days before onset",
+           {x <- phenos_imputed_div$nec_timing[phenos_imputed_div$nec_stage == "pre_NEC"]
+            sprintf("median %g, range %g-%g days", median(x), min(x), max(x))})
+```
+
+
+```{r}
+col_no  <- "#009E73"   # bluish green — No NEC
+col_yes <- "#CC79A7"   # purple       — NEC
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Figure 3A — Shannon diversity by NEC status across postnatal weeks
+# ══════════════════════════════════════════════════════════════════════════════
+
+phenos_imputed_div$nec <- factor(as.character(phenos_imputed_div$nec),
+                                 levels = c("0", "1"),
+                                 labels = c("No", "Yes"))
+
+phenos_imputed_div$week <- factor(as.character(phenos_imputed_div$week),
+                                  levels = c("1", "2", "3", "4", "5", "6", "7", "8"),
+                                  labels = c("W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8"))
+
+# ── Statistical tests per week ────────────────────────────────────────────────
+stats_3A <- phenos_imputed_div %>%
+  filter(!is.na(Shannon), !is.na(nec), !is.na(week)) %>%
+  group_by(week) %>%
+  filter(n_distinct(nec) == 2) %>%
+  mutate(nec = droplevels(nec)) %>%
+  summarise(
+    p_value = wilcox.test(Shannon ~ nec, exact = FALSE)$p.value,
+    y_pos   = max(Shannon, na.rm = TRUE) * 1.05,   # just above the max value
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj        = p.adjust(p_value, method = "BH"),
+    significance = case_when(
+      p_adj < 0.001 ~ "***",
+      p_adj < 0.01  ~ "**",
+      p_adj < 0.05  ~ "*",
+      TRUE          ~ " "
+    )
+  )
+
+# ── Plot ──────────────────────────────────────────────────────────────────────
+
+plot_data_3A <- phenos_imputed_div %>%
+  filter(!is.na(Shannon) & !is.na(nec) & !is.na(week))
+
+shannon_plot <- ggplot(plot_data_3A,
+                       aes(x = week, y = Shannon, fill = nec, color = nec)) +
+  scale_fill_manual(values  = c("No" = col_no, "Yes" = col_yes)) +
+  scale_color_manual(values = c("No" = col_no, "Yes" = col_yes)) +
+  geom_boxplot(alpha = 0.4, outlier.colour = NA) +
+  geom_point(
+    alpha    = 0.6,
+    position = position_jitterdodge(jitter.width = 0.3, jitter.height = 0)
+  ) +
+  geom_text(
+    data        = stats_3A,
+    aes(x = week, y = y_pos, label = significance),
+    inherit.aes = FALSE,
+    size        = 5
+  ) +
+  theme_bw() +
+  labs(
+    x     = "Postnatal Week",
+    y     = "Shannon Diversity Index",
+    fill  = "NEC",
+    color = "NEC"
+  ) +
+  theme(
+    axis.title.y = element_text(color = "black", size = 18),
+    axis.title.x = element_text(color = "black", size = 18),
+    axis.text.y  = element_text(size = 12),
+    axis.text.x  = element_text(size = 12, angle = 60, hjust = 1)
+  )
+
+print(shannon_plot)
+ggsave("4A_shannon_with_nec_week.pdf", plot = shannon_plot,
+       width = 6, height = 5)
+cat("✓ Saved: 4A_shannon_with_nec_week.pdf\n")
+
+# ── Sample counts ─────────────────────────────────────────────────────────────
+
+sample_counts_3A <- phenos_imputed_div %>%
+  filter(!is.na(Shannon), !is.na(nec), !is.na(week)) %>%
+  group_by(week, nec) %>%
+  summarise(N_samples = n(), .groups = "drop") %>%
+  pivot_wider(names_from  = nec,
+              values_from = N_samples,
+              values_fill = 0) %>%
+  rename(NEC_No = No, NEC_Yes = Yes)
+
+print(sample_counts_3A)
+
+# LEGEND NUMBERS: Fig. 3a (Shannon computed after removing probiotic species)
+legend_out("Fig 3a - samples / infants per week and NEC status",
+           plot_data_3A %>% n_si(week, nec))
+legend_out("Fig 3a - per-week Wilcoxon (two-sided), BH across weeks",
+           stats_3A %>% transmute(week, p_value = signif(p_value, 3),
+                                  p_adj = signif(p_adj, 3)))
+# Overall test across weeks
+dat3a <- plot_data_3A %>%
+  filter(!is.na(Postnatal_Age), !is.na(Clean_reads_P1), !is.na(DNA_conc)) %>%
+  mutate(across(c(Postnatal_Age, Clean_reads_P1, DNA_conc),
+                ~ as.numeric(scale(.x)), .names = "{.col}_z"))
+m0_3a <- lmer(Shannon ~ Postnatal_Age_z + Clean_reads_P1_z + DNA_conc_z + (1 | MM_ID),
+              data = dat3a, REML = FALSE)
+m1_3a <- update(m0_3a, . ~ . + nec)
+cf_3a <- summary(m1_3a)$coefficients
+legend_out("Fig 3a - overall LMM: Shannon ~ NEC + age + reads + DNA conc + (1|infant)",
+           sprintf("n = %d samples / %d infants | effect = %.3f (SE %.3f) | LRT p = %.2g",
+                   nrow(dat3a), dplyr::n_distinct(dat3a$MM_ID),
+                   cf_3a["necYes", "Estimate"], cf_3a["necYes", "Std. Error"],
+                   anova(m1_3a, m0_3a)[["Pr(>Chisq)"]][2]))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Figure 3B — PCoA coloured by NEC status
+# ══════════════════════════════════════════════════════════════════════════════
+
+phenos_imputed_div_pc_CLR$nec <- factor(as.character(phenos_imputed_div_pc_CLR$nec),
+                                 levels = c("0", "1"),
+                                 labels = c("No", "Yes"))
+
+pcoa_plot <- ggplot(phenos_imputed_div_pc_CLR, aes(PC1, PC2, color = nec)) +
+  geom_point(size = 2, alpha = 0.8) +
+  stat_ellipse(aes(group = nec, fill = nec),
+               type = "norm", linetype = 2, geom = "path",
+               alpha = 0.8, show.legend = TRUE) +
+  xlab(paste0("PCo1 = ", round(my_var_CLR[1], 2), "%")) +
+  ylab(paste0("PCo2 = ", round(my_var_CLR[2], 2), "%")) +
+  scale_fill_manual(name  = "NEC",
+                    values = c("No" = col_no, "Yes" = col_yes)) +
+  scale_color_manual(name = "NEC",
+                     values = c("No" = col_no, "Yes" = col_yes)) +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 16))) +
+  theme(
+    plot.subtitle    = element_text(vjust = 1),
+    plot.caption     = element_text(vjust = 1),
+    axis.title.x     = element_text(size = 18),
+    axis.title.y     = element_text(size = 18),
+    axis.line.x      = element_line(),
+    axis.line.y      = element_line(),
+    legend.position  = "bottom",
+    legend.title     = element_text(size = 18),
+    legend.text      = element_text(size = 18),
+    legend.key       = element_blank(),
+    panel.grid.major = element_line(colour = NA),
+    panel.grid.minor = element_line(colour = NA),
+    panel.background = element_rect(fill = NA)
+  )
+
+# ── Add marginal histograms ───────────────────────────────────────────────────
+
+pcoa_marginal <- ggExtra::ggMarginal(
+  pcoa_plot,
+  type        = "histogram",
+  groupColour = FALSE,
+  groupFill   = TRUE,
+  xparams     = list(bins = 60, alpha = 0.8, position = "identity", color = "white"),
+  yparams     = list(bins = 60, alpha = 0.8, position = "identity", color = "white")
+)
+
+print(pcoa_marginal)
+
+ggsave("4B_nec_PCoA_plot.pdf", plot = pcoa_marginal, width = 6, height = 5)
+
+# LEGEND NUMBERS: Fig. 3b
+pc3b <- phenos_imputed_div_pc_CLR %>% as.data.frame() %>%
+  filter(!is.na(nec), !is.na(Clean_reads_P1), !is.na(DNA_conc), !is.na(Postnatal_Age))
+set.seed(42)
+ad_3b <- adonis2(as.dist(as.matrix(my_distance_CLR)[rownames(pc3b), rownames(pc3b)]) ~
+                   Clean_reads_P1 + DNA_conc + Postnatal_Age + nec,
+                 data = pc3b, permutations = 10000, by = "margin")
+legend_out("Fig 3b - samples / infants by NEC status", pc3b %>% n_si(nec))
+legend_out("Fig 3b - PERMANOVA, NEC (+ reads + DNA conc + postnatal age)",
+           sprintf("n = %d samples / %d infants | R2 = %.4f | F = %.2f | p = %.2g",
+                   nrow(pc3b), dplyr::n_distinct(pc3b$MM_ID), ad_3b["nec", "R2"],
+                   ad_3b["nec", "F"], ad_3b["nec", "Pr(>F)"]))
+legend_out("Fig 3b - PCoA variance explained (%)",
+           sprintf("PCo1 %.2f | PCo2 %.2f", my_var_CLR[1], my_var_CLR[2]))
+
+```
+
+```{r}
+#Figure 3C
+taxa_sp_mixed <- read.delim("taxa_sp_mixed_all_nopbtx_prenec.txt")
+
+nec_results <- taxa_sp_mixed %>%
+  filter(Pheno %in% c("nec")) %>%  
+  filter(FDR < 0.05)  
+
+nec_results <- nec_results %>%
+  select(Bug, Pheno, t.value, P, FDR) %>%
+  rename(phenotype = Pheno) %>%
+  group_by(Bug) %>%  # Group by Bug to check for duplicates
+  slice_min(order_by = FDR, with_ties = FALSE) %>%  # Keep only the row with the lowest FDR
+  ungroup()  # Ungroup after filtering
+
+long_data <- melt(nec_results, id.vars = c("Bug", "phenotype"), measure.vars = "t.value")
+
+# Order Bugs by t.value (highest positive to lowest negative)
+long_data <- long_data %>%
+  mutate(Bug = reorder(Bug, -value))  # Negative sign ensures descending order
+
+long_data <- long_data %>%
+  mutate(
+    abundance_direction = factor(
+      ifelse(value > 0, "More", "Less"),
+      levels = c("Less", "More")
+    )
+  )
+
+# Species names: underscores out, genus abbreviated, printed in italics.
+# Set ABBREVIATE_GENUS to FALSE to keep the full genus name.
+ABBREVIATE_GENUS <- TRUE
+
+pretty_species <- function(x) {
+  x <- gsub("_", " ", x)
+  x <- sub(" sp ", " sp. ", x)
+  if (ABBREVIATE_GENUS)
+    x <- ifelse(grepl("^[A-Z][a-z]+ sp\\.", x), x,
+                sub("^([A-Z])[a-z]+ ", "\\1. ", x))
+  x
+}
+
+long_data <- long_data %>%
+  mutate(Bug_clean = pretty_species(as.character(Bug)),
+         Bug_clean = reorder(Bug_clean, -value))
+
+# Flipped bar plot, species names in italics
+tall_plot <- ggplot(long_data, aes(x = Bug_clean, y = value, fill = abundance_direction)) +
+  geom_bar(stat = "identity", color = "black", width = 0.7) +
+  xlab("") +
+  ylab("t-value") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(size = 12),
+    axis.text.y = element_text(size = 16, face = "italic"),
+    axis.title.x = element_text(size = 16),
+    legend.text = element_text(size = 16),
+    legend.title = element_text(size = 16),
+    legend.position = "bottom",
+    panel.grid.major.x = element_line(color = "#EBEBEB"),
+    panel.grid.minor.x = element_line(color = "#EBEBEB"),
+    panel.grid.major.y = element_blank()
+  ) +
+  scale_fill_manual(
+    values = alpha(c("Less" = "#1f77b4", "More" = "#CC79A7"), 0.9),
+    labels = c("Less" = "", "More" = "")
+  ) +
+  guides(fill = guide_legend(title = "Increased pre-NEC abundance")) +
+  coord_flip()
+
+ggsave(filename = "3C_nec.pdf", plot = tall_plot, width = 7, height = 6, dpi = 300)
+
+# LEGEND NUMBERS: Fig. 3c
+legend_out("Fig 3c - model file",
+           sprintf("phenotypes: %d | species: %d | unique species x phenotype tests: %d | NEC tests: %d",
+                   dplyr::n_distinct(taxa_sp_mixed$Pheno), dplyr::n_distinct(taxa_sp_mixed$Bug),
+                   nrow(dplyr::distinct(taxa_sp_mixed, Bug, Pheno)),
+                   sum(taxa_sp_mixed$Pheno == "nec")))
+legend_out("Fig 3c - plotted species (FDR < 0.05)",
+           nec_results %>% transmute(Bug, t.value = round(t.value, 2),
+                                     P = signif(P, 3), FDR = signif(FDR, 3)))
+
+# Display the updated plot
+tall_plot
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# Figure 3d — NEC prediction: two taxa (± birthweight), leave-one-out
+# Input: phenos_imputed_div.txt (one row per infant sample; see README)
+# ══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEC Prediction — Two Taxa (± birthweight) at species & subspecies levels
+# ═══════════════════════════════════════════════════════════════════════════════
+
+library(pROC)
+library(tidyverse)
+library(writexl)
+
+filter <- dplyr::filter; select <- dplyr::select
+mutate <- dplyr::mutate; arrange <- dplyr::arrange
+group_by <- dplyr::group_by; ungroup <- dplyr::ungroup
+summarise <- dplyr::summarise; slice <- dplyr::slice; n <- dplyr::n
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — Load phenotype data and define the NEC outcome
+# ═══════════════════════════════════════════════════════════════════════════════
+
+phenos <- read.delim("phenos_imputed_div.txt", sep = "\t",
+                     header = TRUE, stringsAsFactors = FALSE,
+                     check.names = FALSE)
+
+phenos$nec_timing <- phenos$necpostnatal - phenos$Postnatal_Age
+
+phenos$nec_stage  <- case_when(
+  phenos$nec_timing >= 0   ~ "pre_NEC",
+  phenos$nec_timing <= 0   ~ "post_NEC",
+  is.na(phenos$nec_timing) ~ "no_NEC"
+)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — Pick one sample per infant
+# ═══════════════════════════════════════════════════════════════════════════════
+
+pre_nec <- phenos %>%
+  filter(nec_stage == "pre_NEC") %>%
+  group_by(MM_ID) %>%
+  slice_min(nec_timing, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+min_age <- min(pre_nec$Postnatal_Age, na.rm = TRUE)
+max_age <- max(pre_nec$Postnatal_Age, na.rm = TRUE)
+
+no_nec <- phenos %>%
+  filter(nec_stage == "no_NEC") %>%
+  group_by(MM_ID) %>%
+  slice_min(Postnatal_Age, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  filter(Postnatal_Age >= min_age, Postnatal_Age <= max_age)
+
+final_dataset <- bind_rows(pre_nec, no_nec) %>% as.data.frame()
+rownames(final_dataset) <- final_dataset$ID
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — Load taxa; build SPECIES and SUBSPECIES feature matrices
+# ═══════════════════════════════════════════════════════════════════════════════
+
+taxa <- read.delim("taxa_cleaned_jan.txt")
+rownames(taxa) <- taxa$ID; taxa$ID <- NULL
+
+build_level <- function(taxa, level = c("species", "subspecies"),
+                        prev_min = 0.01) {
+  level <- match.arg(level)
+  sub   <- taxa[, grep("s__", colnames(taxa)), drop = FALSE]
+  is_t  <- grepl("t__", colnames(sub))
+  m <- if (level == "species") sub[, !is_t, drop = FALSE]
+       else                    sub[,  is_t, drop = FALSE]
+  colnames(m) <- gsub(".*s__", "", colnames(m))
+  prev_ok <- apply(m, 2, function(x) sum(x != 0, na.rm = TRUE) /
+                                     sum(!is.na(x))) > prev_min
+  as.matrix(m[, prev_ok, drop = FALSE])
+}
+
+taxa_species    <- build_level(taxa, "species")
+taxa_subspecies <- build_level(taxa, "subspecies")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 4 — Align; define outcome and birthweight (shared)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+ids  <- intersect(rownames(final_dataset), rownames(taxa))
+meta <- final_dataset[ids, ]
+
+y <- ifelse(meta$nec_stage == "pre_NEC", 1, 0)
+names(y) <- rownames(meta)
+
+# Safe coercion (as.numeric() on a FACTOR returns level codes, not values).
+num_safe <- function(x) if (is.numeric(x)) x else as.numeric(as.character(x))
+
+stopifnot("bw" %in% colnames(meta))
+
+# Birthweight, aligned to y. Scaled → OR per +1 SD. Scaling is a monotone
+# transform → no effect on AUC; it only rescales the printed OR.
+clin <- data.frame(
+  bw        = as.numeric(scale(num_safe(meta$bw))),
+  row.names = names(y)
+)
+stopifnot(!anyNA(clin))
+
+# Log-transform aligned abundance matrix (pseudo-count avoids log(0)).
+pseudo <- 1e-8
+make_Xlog <- function(taxa_level, ids) log(taxa_level[ids, , drop = FALSE] + pseudo)
+
+X_log_species    <- make_Xlog(taxa_species,    ids)
+X_log_subspecies <- make_Xlog(taxa_subspecies, ids)
+
+cat(sprintf("n = %d (events = %d)\n", length(y), sum(y)))
+cat(sprintf("Candidate features — species: %d | subspecies: %d\n",
+            ncol(X_log_species), ncol(X_log_subspecies)))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 5 — Shared helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Univariate screen: one logistic regression per feature, ranked by AUC ───
+screen_taxa <- function(X_log, y) {
+  res <- tibble(Feature = colnames(X_log),
+                AUC = NA_real_, Coef = NA_real_,
+                OR  = NA_real_, p_value = NA_real_)
+  for (i in seq_len(ncol(X_log))) {
+    xi <- X_log[, i]
+    if (length(unique(xi)) < 2) next
+    fit <- tryCatch(suppressWarnings(glm(y ~ xi, family = binomial())),
+                    error = function(e) NULL)
+    if (is.null(fit)) next
+    pred <- predict(fit, type = "response")
+    res$AUC[i] <- as.numeric(pROC::auc(
+      pROC::roc(y, pred, quiet = TRUE, direction = "<", levels = c(0, 1))))
+    s <- summary(fit)$coefficients
+    if ("xi" %in% rownames(s)) {
+      res$Coef[i]    <- s["xi", "Estimate"]
+      res$OR[i]      <- exp(s["xi", "Estimate"])
+      res$p_value[i] <- s["xi", "Pr(>|z|)"]
+    }
+  }
+  res %>% arrange(desc(AUC))
+}
+
+# ── Tidy coefficient table with Wald ORs and 95% CIs ────────────────────────
+coef_table <- function(fit, name_map = NULL) {
+  s <- summary(fit)$coefficients
+  out <- tibble(
+    Feature     = rownames(s),
+    Coefficient = s[, "Estimate"],
+    SE          = s[, "Std. Error"],
+    p_value     = s[, "Pr(>|z|)"]
+  ) %>%
+    mutate(OR      = exp(Coefficient),
+           OR_low  = exp(Coefficient - 1.96 * SE),
+           OR_high = exp(Coefficient + 1.96 * SE))
+  if (!is.null(name_map))
+    out$Feature <- ifelse(out$Feature %in% names(name_map),
+                          name_map[out$Feature], out$Feature)
+  out
+}
+
+loo_taxa_clin <- function(X_log, y, clinical = NULL, n_taxa = 2) {
+  N <- length(y); preds <- numeric(N); picks <- vector("list", N)
+  for (i in seq_len(N)) {
+    tr <- setdiff(seq_len(N), i)
+    uni_i  <- screen_taxa(X_log[tr, , drop = FALSE], y[tr])
+    uni_i  <- uni_i[!is.na(uni_i$AUC), ]
+    pick_i <- head(uni_i$Feature, n_taxa); picks[[i]] <- pick_i
+
+    tr_list <- list(y = y[tr]); te_list <- list()
+    if (!is.null(clinical)) for (cn in colnames(clinical)) {
+      tr_list[[cn]] <- clinical[tr, cn]; te_list[[cn]] <- clinical[i, cn]
+    }
+    for (k in seq_along(pick_i)) {
+      nm <- paste0("sp", k)
+      tr_list[[nm]] <- X_log[tr, pick_i[k]]; te_list[[nm]] <- X_log[i, pick_i[k]]
+    }
+    fit <- suppressWarnings(glm(y ~ ., data = as.data.frame(tr_list),
+                                family = binomial()))
+    preds[i] <- predict(fit, newdata = as.data.frame(te_list), type = "response")
+  }
+  list(preds = preds, picks = picks,
+       roc = pROC::roc(y, preds, quiet = TRUE, direction = "<", levels = c(0, 1)))
+}
+
+auc_num <- function(o) as.numeric(pROC::auc(o$roc))
+auc_ci  <- function(o) as.numeric(pROC::ci.auc(o$roc))   # c(low, auc, high)
+
+# ── Full single-level analysis: 2-curve ROC + bw-adjusted odds graph ────────
+run_level <- function(X_log, y, clin, level_label, file_tag,
+                      fig_width = 4) {            # shared width for BOTH plots
+
+  stopifnot(ncol(X_log) >= 2)
+
+  # Two honest-LOO models for the ROC.
+  loo_taxa <- loo_taxa_clin(X_log, y, clinical = NULL,                      n_taxa = 2)
+  loo_bw   <- loo_taxa_clin(X_log, y, clinical = clin[, "bw", drop = FALSE], n_taxa = 2)
+
+  # Descriptive birthweight-ADJUSTED model for the odds graph. Birthweight is a
+  # covariate (so the taxa ORs are adjusted for it) but its row is hidden from
+  # the forest plot below — only the two taxa ORs are shown.
+  uni  <- screen_taxa(X_log, y)
+  top2 <- head(uni$Feature[!is.na(uni$AUC)], 2)
+  dat  <- data.frame(y = y, bw = clin$bw,
+                     sp1 = X_log[, top2[1]], sp2 = X_log[, top2[2]])
+  fit_adj <- glm(y ~ bw + sp1 + sp2, data = dat, family = binomial())
+  coefs   <- coef_table(fit_adj, name_map = setNames(top2, c("sp1", "sp2")))
+
+  pick_tab <- sort(table(sapply(loo_taxa$picks,
+                   function(p) paste(sort(p), collapse = " + "))),
+                   decreasing = TRUE)
+
+  # Colours shared across both levels → same colour = same model.
+  c_taxa <- "#264653"; c_bw <- "#e76f51"
+
+  # ── FIGURE 1: ROC with two curves ──
+  pdf(sprintf("ROC_NEC_%s.pdf", file_tag), width = fig_width, height = 6)
+    plot(loo_taxa$roc, col = c_taxa, lwd = 2.5, legacy.axes = TRUE,
+         main = sprintf("NEC prediction (%s) — taxa ± birthweight (LOO)", level_label))
+    lines(loo_bw$roc, col = c_bw, lwd = 2.5)
+    legend("bottomright", bty = "n", cex = 0.82, lwd = 2.5,
+           col = c(c_taxa, c_bw),
+           legend = c(sprintf("Taxa only (AUC = %.2f)",         auc_num(loo_taxa)),
+                      sprintf("Taxa + birthweight (AUC = %.2f)", auc_num(loo_bw))))
+  dev.off()
+
+  # ── FIGURE 2: odds-ratio forest plot — two taxa, adjusted for birthweight ──
+  # Birthweight stays in the model as a covariate; its row is dropped here so
+  # only the two taxa odds ratios are shown. pretty_species() is defined in the
+  # Figure 3c chunk.
+  df_plot <- coefs %>%
+    filter(!Feature %in% c("(Intercept)", "bw")) %>%
+    mutate(label = pretty_species(Feature),
+           label = factor(label, levels = label[order(OR)]))
+  p_coef <- ggplot(df_plot,
+                   aes(y = label, x = OR, xmin = OR_low, xmax = OR_high)) +
+    geom_vline(xintercept = 1, linetype = "dashed", colour = "grey50") +
+    geom_pointrange(size = 0.5, linewidth = 0.7, colour = "#fa2b13") +
+    scale_x_log10() +
+    theme_bw(base_size = 11) +
+    theme(axis.text.y = element_text(face = "italic", size = 12)) +
+    labs(x = "Odds ratio (per unit increase in log abundance)", y = NULL)
+  ggsave(sprintf("3D_Coef_NEC_%s.pdf", file_tag), p_coef,
+         width = fig_width, height = 3.5)      # same width as the ROC above
+
+  # ── Console summary ──
+  ci_t <- auc_ci(loo_taxa); ci_b <- auc_ci(loo_bw)
+  cat(sprintf("\n══════ %s level ══════\n", toupper(level_label)))
+  cat(sprintf("  candidate features : %d\n", ncol(X_log)))
+  cat(sprintf("  top-2 (full data)  : %s | %s\n", top2[1], top2[2]))
+  cat(sprintf("  AUC taxa only      : %.3f  (95%% CI %.3f-%.3f)\n", ci_t[2], ci_t[1], ci_t[3]))
+  cat(sprintf("  AUC + birthweight  : %.3f  (95%% CI %.3f-%.3f)\n", ci_b[2], ci_b[1], ci_b[3]))
+  cat("  coefficients ( ):\n"); print(as.data.frame(coefs))
+
+  list(level = level_label, uni = uni, top2 = top2, coefs = coefs,
+       pick_tab = pick_tab, fit_adj = fit_adj,
+       loo_taxa = loo_taxa, loo_bw = loo_bw)
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 6 — Run at both taxonomic levels
+# ═══════════════════════════════════════════════════════════════════════════════
+
+cat("\nRunning SPECIES-level models...\n")
+res_species    <- run_level(X_log_species,    y, clin, "species",    "species")
+
+cat("\nRunning SUBSPECIES-level models...\n")
+res_subspecies <- run_level(X_log_subspecies, y, clin, "subspecies", "subspecies")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# STEP 7 — Export everything to one Excel workbook
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Long-format AUC summary: one row per level × model.
+auc_row <- function(res, model_label, loo) {
+  ci <- auc_ci(loo)
+  data.frame(Level = res$level, Model = model_label,
+             AUC = ci[2], CI_low = ci[1], CI_high = ci[3])
+}
+auc_summary <- bind_rows(
+  auc_row(res_species,    "taxa only", res_species$loo_taxa),
+  auc_row(res_species,    "taxa + bw", res_species$loo_bw),
+  auc_row(res_subspecies, "taxa only", res_subspecies$loo_taxa),
+  auc_row(res_subspecies, "taxa + bw", res_subspecies$loo_bw)
+)
+
+
+# LEGEND NUMBERS: Fig. 3d (same legend file as panels a-c)
+legend_out("Infants analysed (one sample each)",
+   sprintf("n = %d | NEC = %d | controls = %d", length(y), sum(y), sum(y == 0)))
+legend_out("Check: nec = 1 without onset day (would be counted as control)",
+   as.character(sum(phenos$nec == 1 & is.na(phenos$necpostnatal), na.rm = TRUE)))
+legend_out("Postnatal age of the selected sample (days), by group",
+   meta %>% mutate(group = ifelse(y == 1, "NEC", "control")) %>%
+     group_by(group) %>%
+     summarise(median = median(Postnatal_Age), min = min(Postnatal_Age),
+               max = max(Postnatal_Age), .groups = "drop"))
+legend_out("NEC cases: days from sample to onset",
+   {x <- meta$nec_timing[y == 1]
+    sprintf("median %g, range %g-%g", median(x), min(x), max(x))})
+if ("probiotics" %in% colnames(meta))
+  legend_out("Probiotic exposure at the selected sample, by group",
+     as.data.frame(table(group = ifelse(y == 1, "NEC", "control"),
+                         probiotics = meta$probiotics, useNA = "ifany")))
+legend_out("Species-level candidate features (prevalence > 1%)",
+   as.character(ncol(X_log_species)))
+legend_out("Fig 3d - bw-adjusted model, species level (full data)", res_species$coefs)
+legend_out("Fig 3d - top-2 pair selected across LOO folds (taxa only)",
+   as.data.frame(res_species$pick_tab))
+legend_out("LOO AUC (species)", auc_summary %>% filter(Level == "species"))
+
+loo_preds_df <- function(res) data.frame(
+  ID = names(y), y_true = y,
+  pred_taxa_only = res$loo_taxa$preds,
+  pred_taxa_bw   = res$loo_bw$preds
+)
+
+write_xlsx(
+  list(
+    "AUC summary"               = auc_summary,
+    "Species - univariate"      = as.data.frame(res_species$uni),
+    "Species - coefficients"    = as.data.frame(res_species$coefs),
+    "Species - pair freq"       = as.data.frame(res_species$pick_tab),
+    "Species - LOO preds"       = loo_preds_df(res_species),
+    "Subspecies - univariate"   = as.data.frame(res_subspecies$uni),
+    "Subspecies - coefficients" = as.data.frame(res_subspecies$coefs),
+    "Subspecies - pair freq"    = as.data.frame(res_subspecies$pick_tab),
+    "Subspecies - LOO preds"    = loo_preds_df(res_subspecies)
+  ),
+  path = "NEC_taxa_bw_species_subspecies.xlsx"
+)
+
+cat("\nDone. Figures: ROC_NEC_species.pdf, 3D_Coef_NEC_species.pdf,",
+    "ROC_NEC_subspecies.pdf, 3D_Coef_NEC_subspecies.pdf\n")
+```
+
+```{r}
+#Supplemental Figure pre-post NEC
+phenos_imputed_div_pc_CLR$sample <- ifelse(
+phenos_imputed_div_pc_CLR$nec == "Yes" &
+    !is.na(phenos_imputed_div_pc_CLR$necpostnatal) &
+    !is.na(phenos_imputed_div_pc_CLR$Postnatal_Age),
+phenos_imputed_div_pc_CLR$necpostnatal - phenos_imputed_div_pc_CLR$Postnatal_Age,
+  NA_real_
+)
+
+phenos_imputed_div_pc_CLR$sample_group <- factor(
+  ifelse(
+    is.na(phenos_imputed_div_pc_CLR$sample), NA_character_,
+    ifelse(phenos_imputed_div_pc_CLR$sample < 0, "Post-NEC", "Pre-NEC")
+  ),
+  levels = c("Pre-NEC", "Post-NEC")
+)
+
+# Filter for non-NA PC1, PC2, and sample_group
+plot_data <- phenos_imputed_div_pc_CLR %>%
+  filter(!is.na(PC1), !is.na(PC2), !is.na(sample_group))  # Ensures all relevant columns are complete
+
+# Create the plot
+overall <- ggplot(plot_data, aes(PC1, PC2, color = sample_group)) +
+  geom_point(size = 2, alpha = 0.8) +  # Scatter plot without extra borders
+  stat_ellipse(aes(group = sample_group),
+               type = "norm", linetype = 2, geom = "path", alpha = 0.8, show.legend = TRUE) +  
+  xlab(paste("PCo1=", round(my_var_CLR[1], digits = 2), "%", sep = "")) +
+  ylab(paste("PCo2=", round(my_var_CLR[2], digits = 2), "%", sep = "")) +
+  scale_fill_manual(name = "NEC", values = c("#54b7a6", "#fa2b13")) + 
+  scale_color_manual(name = "NEC", values = c("#54b7a6", "#fa2b13")) +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 16))) +  # Removes box, keeps dot
+  theme(plot.subtitle = element_text(vjust = 1),
+        plot.caption = element_text(vjust = 1),
+        axis.title.x = element_text(size = 18),
+        axis.title.y = element_text(size = 18),
+        axis.line.x = element_line(),
+        axis.line.y = element_line(),
+        legend.position = 'bottom',
+        legend.title = element_text(size = 18),
+        legend.text = element_text(size = 18),
+        legend.key = element_blank(),  # Removes the box behind the legend key
+        panel.grid.major = element_line(colour = NA),
+        panel.grid.minor = element_line(colour = NA),
+        panel.background = element_rect(fill = NA))
+
+
+# Add marginal histograms
+overall <- ggExtra::ggMarginal(overall, type = "histogram", groupColour = FALSE, groupFill = TRUE,
+                               xparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white'),
+                               yparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white'))
+
+# Display the plot
+overall 
+
+ggsave(filename = "3_prepost_NEC_nopbtx.png", plot = overall, width = 6, height = 5, dpi = 300)
+```
+
+```{r}
+#Figure 3E - Supplemental
+
+# Assign group labels based on surgery type, but only for NEC cases
+phenos_imputed_div_pc_CLR$surgery <- dplyr::case_when(
+  phenos_imputed_div_pc_CLR$nec == "Yes" & is.na(phenos_imputed_div_pc_CLR$necsurgery) ~ "Medical",
+  phenos_imputed_div_pc_CLR$nec == "Yes" & phenos_imputed_div_pc_CLR$necsurgery > 0 ~ "Surgical",
+  phenos_imputed_div_pc_CLR$nec == "Yes" ~ "Medical",  # handles nec == "Yes" and necsurgery == 0
+  TRUE ~ NA_character_  
+)
+
+# Convert to factor with consistent level order
+phenos_imputed_div_pc_CLR$surgery <- factor(
+  phenos_imputed_div_pc_CLR$surgery,
+  levels = c("Medical", "Surgical")
+)
+
+# Filter for complete data
+plot_data <- phenos_imputed_div_pc_CLR %>%
+  filter(!is.na(PC1), !is.na(PC2), !is.na(surgery))
+
+# Create the plot
+overall <- ggplot(plot_data, aes(PC1, PC2, color = surgery)) +
+  geom_point(size = 2, alpha = 0.8) +
+  stat_ellipse(aes(group = surgery),  # Match ellipse group to surgery
+               type = "norm", linetype = 2, geom = "path", alpha = 0.8, show.legend = TRUE) +  
+  xlab(paste("PCo1=", round(my_var_CLR[1], digits = 2), "%", sep = "")) +
+  ylab(paste("PCo2=", round(my_var_CLR[2], digits = 2), "%", sep = "")) +
+  scale_fill_manual(name = "Surgery", values = c("Medical" = "#54b7a6", "Surgical" = "#fa2b13")) + 
+  scale_color_manual(name = "Surgery", values = c("Medical" = "#54b7a6", "Surgical" = "#fa2b13")) +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 16))) +
+  theme(
+    plot.subtitle = element_text(vjust = 1),
+    plot.caption = element_text(vjust = 1),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    axis.line.x = element_line(),
+    axis.line.y = element_line(),
+    legend.position = 'bottom',
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 18),
+    legend.key = element_blank(),
+    panel.grid.major = element_line(colour = NA),
+    panel.grid.minor = element_line(colour = NA),
+    panel.background = element_rect(fill = NA)
+  )
+
+# Add marginal histograms
+if (nrow(plot_data) > 1) {
+  overall <- ggExtra::ggMarginal(
+    overall, type = "histogram", groupColour = FALSE, groupFill = TRUE,
+    xparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white'),
+    yparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white')
+  )
+}
+
+# Display and save the plot
+print(overall)
+ggsave(filename = "3_nec_surgical_PCoA_plot.png", plot = overall, width = 6, height = 5, dpi = 300)
+```
+
+```{r}
+#Supplemental
+phenos_imputed_div_pc_CLR$sepsis_status <- factor(
+phenos_imputed_div_pc_CLR$sepsis_culture,
+  levels = c(0, 1),
+  labels = c("No Sepsis", "Sepsis")
+)
+
+# Step 2: Filter for non-NA PC1, PC2, and sepsis_status
+plot_data <-phenos_imputed_div_pc_CLR %>%
+  filter(!is.na(PC1), !is.na(PC2), !is.na(sepsis_status), nec == "Yes")
+
+# Step 3: Create the plot
+overall <- ggplot(plot_data, aes(PC1, PC2, color = sepsis_status)) +
+  geom_point(size = 2, alpha = 0.8) +
+  stat_ellipse(aes(group = sepsis_status), type = "norm", linetype = 2, geom = "path", alpha = 0.8) +
+  xlab(paste("PCo1 = ", round(my_var_CLR[1], digits = 2), "%", sep = "")) +
+  ylab(paste("PCo2 = ", round(my_var_CLR[2], digits = 2), "%", sep = "")) +
+  scale_color_manual(name = "Sepsis Status", values = c("No Sepsis" = "#54b7a6", "Sepsis" = "#fa2b13")) +
+  scale_fill_manual(name = "Sepsis Status", values = c("No Sepsis" = "#54b7a6", "Sepsis" = "#fa2b13")) +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 16))) +
+  theme(
+    plot.subtitle = element_text(vjust = 1),
+    plot.caption = element_text(vjust = 1),
+    axis.title.x = element_text(size = 18),
+    axis.title.y = element_text(size = 18),
+    axis.line.x = element_line(),
+    axis.line.y = element_line(),
+    legend.position = 'bottom',
+    legend.title = element_text(size = 18),
+    legend.text = element_text(size = 18),
+    legend.key = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = NA)
+  )
+
+# Step 4: Add marginal histograms
+overall <- ggExtra::ggMarginal(
+  overall,
+  type = "histogram", groupColour = FALSE, groupFill = TRUE,
+  xparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white'),
+  yparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white')
+)
+
+# Step 5: Display the plot
+print(overall)
+```
+

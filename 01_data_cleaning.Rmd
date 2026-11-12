@@ -1,0 +1,122 @@
+---
+title: "Data cleaning"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+library(readr)
+taxa_raw <- read_tsv("MM_metaphlan4vOct22_infantis_final_2026.txt")
+taxa_raw<- as.data.frame(taxa_raw)
+row.names(taxa_raw) <-taxa_raw$NG_ID
+KN <- read_tsv("MM_KN_stats_final_2026.txt")
+KN<- as.data.frame(KN)
+row.names(KN) <-KN$KN_ID
+check <- KN [grep("^B", rownames(KN)), ]
+KN$KN_ID=NULL
+```
+
+```{r}
+
+options(scipen = 999)
+sel <- grepl("^B", rownames(KN))
+
+png("histogram_clean_reads_P1.png", width = 6, height = 5, units = "in", res = 300)
+
+hist(
+  KN$Clean_reads_P1[sel],
+  breaks = 350,
+  main = "Histogram of Clean Reads",
+  xlab = "Clean Reads",
+  col = "steelblue",
+  border = "white",
+  xaxt = "n"
+)
+axis(
+  side = 1,
+  at = pretty(KN$Clean_reads_P1[sel], n = 10),
+  labels = format(
+    pretty(KN$Clean_reads_P1[sel], n = 10),
+    scientific = FALSE,
+    big.mark = ","
+  )
+)
+
+dev.off()
+
+cutoff <- 3000000
+sel <- grepl("^B", rownames(KN))
+sum(KN$Clean_reads_P1[sel] > cutoff, na.rm = TRUE)
+
+```
+
+```{r}
+library(plotly)
+library(ggplot2)
+
+KN$ID <- rownames(KN)
+
+p <- ggplot(KN, aes(x = Clean_reads_P1, text = paste0("ID: ", ID, "<br>Clean_reads_P1: ", Clean_reads_P1))) +
+  geom_histogram(bins = 350)
+
+ggplotly(p, tooltip = "text")
+```
+
+```{r}
+# bring Clean_reads_P1 into taxa_raw
+rownames(taxa_raw)[rownames(taxa_raw) == "M200_00_4B08"] <- "P200_00_4B08"
+rownames(KN)[rownames(KN) == "M200_00_4B08"] <- "P200_00_4B08"
+taxa_raw$Clean_reads_P1 <- KN[rownames(taxa_raw), "Clean_reads_P1"]
+
+# check for missing matches
+sum(is.na(taxa_raw$Clean_reads_P1))
+
+median(taxa_raw$Clean_reads_P1)
+
+# keep only samples with >3M reads
+taxa_raw_filt <- taxa_raw[
+  taxa_raw$Clean_reads_P1 > 3000000 | rownames(taxa_raw) == "N300_00_11A7",
+]
+
+# remove the column afterwards
+taxa_raw_filt$Clean_reads_P1 <- NULL
+
+taxa=taxa_raw_filt
+
+#rename probiotics
+rename_map <- c(
+  "MG10BOMPC1_Z" = "P300_00_13H1",
+  "MG10BOMPC2_Z" = "P300_00_13H2"
+)
+rn <- rownames(taxa)
+rn[rn %in% names(rename_map)] <- rename_map[rn[rn %in% names(rename_map)]]
+rownames(taxa) <- rn
+taxa$NG_ID[taxa$NG_ID %in% names(rename_map)] <-
+  rename_map[taxa$NG_ID[taxa$NG_ID %in% names(rename_map)]]
+```
+
+```{r}
+#Remove empty tubes
+remove_dupl <- c(
+  "B013_28_1G01", "B026_04_5G07", "B041_21_1B09",
+  "B136_02_11D6", "M043_00_6B01")
+taxa <- taxa[!(rownames(taxa) %in% remove_dupl), ]
+
+#remove duplicate samples
+remove_duplicate <- c("B116_03_12B2","M056_00_4A08", "M056_00_6F05")
+taxa <- taxa[!(rownames(taxa) %in% remove_duplicate), ]
+
+#Remove samples outside the ellipse (potential sample mix-up)
+remove_outside_ellipse <- c("B001_04_4C08", "B011_31_5F04", "B017_04_5F05", "B071_04_7B01", "B072_15_7H01", "B075_05_7F02", "B075_08_7G02", "B085_03_7B07", "B157_07_10F7", "M009_00_5C03", "M088_00_7F08", "M200_00_4B08")
+taxa <- taxa[!(rownames(taxa) %in% remove_outside_ellipse), ]
+
+remove_meconium <- c("B080_04_7D05", "B118_03_9A01","B134_04_9D08","B045_04_6C01")
+
+taxa <- taxa[!(rownames(taxa) %in% remove_meconium), ]
+```
+

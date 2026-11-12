@@ -1,0 +1,412 @@
+---
+title: "Mixed models"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+# CODE_DIR: root of this repository, one level above this notebook.
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+CODE_DIR <- normalizePath("..")
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+library(tidyverse)
+library(tibble)
+library(lme4)
+library(lmerTest)
+library(vegan)
+library(writexl)
+
+select    <- dplyr::select
+filter    <- dplyr::filter
+mutate    <- dplyr::mutate
+summarise <- dplyr::summarise
+arrange   <- dplyr::arrange
+rename    <- dplyr::rename
+count     <- dplyr::count
+```
+
+```{r}
+# mixed_models(): per-feature linear mixed models. See R/mixed_models.R.
+source(file.path(CODE_DIR, "R", "mixed_models.R"))
+```
+
+```{r}
+# This notebook uses objects built in Figure_1.Rmd and must be run in the same
+# session, after it (see the run order in the README).
+required <- c("metadata_infant", "taxa_sp_filt_CLR", "my_alpha_diversity",
+              "mypcoa_df_CLR", "phenos_imputed_div_pc_CLR")
+missing  <- required[!vapply(required, exists, logical(1))]
+if (length(missing))
+  stop("Run Figure_1.Rmd first; not found: ", paste(missing, collapse = ", "))
+```
+
+```{r}
+# Association of all taxa_SP_filt phenotypes
+
+pheno_list <- c("prolonged_rupt", "mmpercentage", "surgery", "ab48", "apgar_1",
+                "apgar_5", "multiple", "delivery_md", "maternal_atb", "mother_st_com",
+                "placenta_ab", "pe_hellp", "maternal_infect", "mother_b_hem",
+                "antibiotic_sample", "probiotic_sample", "ga_exact", "bw", "nec",
+                "sex", "admissiontime", "tpn_days", "sip", "sepsis_culture",
+                "pda_sign", "mortality", "week", "probiotics", "SGA",
+                "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx")
+
+
+taxa_sp_mixed_all <- mixed_models(metadata_infant, "ID", taxa_sp_filt_CLR, pheno_list)
+
+write.table(taxa_sp_mixed_all, "taxa_sp_mixed_all.txt", sep="\t", row.names=F, quote = F)
+
+```
+
+```{r}
+#association of metadata with PCs
+
+pheno_list <- c("prolonged_rupt", "mmpercentage", "surgery", "ab48", "apgar_1",
+                "apgar_5", "multiple", "delivery_md", "maternal_atb", "mother_st_com",
+                "placenta_ab", "pe_hellp", "maternal_infect", "mother_b_hem",
+                "antibiotic_sample", "probiotic_sample", "ga_exact", "bw", "nec",
+                "sex", "admissiontime", "tpn_days", "sip", "sepsis_culture",
+                "pda_sign", "mortality", "week", "probiotics", "SGA",
+                "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx")
+
+mypcoa_df_CLR_new <- mixed_models(metadata_infant, "ID", mypcoa_df_CLR, pheno_list)
+
+write.table(mypcoa_df_CLR_new, "mypcoa_df_CLR_complete.txt", sep="\t", row.names=F, quote = F)
+
+```
+
+```{r}
+# Association of all taxa_SP_filt phenotypes
+pheno_list <- c("prolonged_rupt", "mmpercentage", "surgery", "ab48", "apgar_1",
+                "apgar_5", "multiple", "delivery_md", "maternal_atb", "mother_st_com",
+                "placenta_ab", "pe_hellp", "maternal_infect", "mother_b_hem",
+                "antibiotic_sample", "probiotic_sample", "ga_exact", "bw", "nec",
+                "sex", "admissiontime", "tpn_days", "sip", "sepsis_culture",
+                "pda_sign", "mortality", "week", "probiotics", "SGA",
+                "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx")
+
+alpha_diversity <- mixed_models(metadata_infant, "ID", my_alpha_diversity, pheno_list)
+
+write.table(alpha_diversity , "alpha_diversity.txt", sep="\t", row.names=F, quote = F)
+```
+
+```{r}
+#NOPROBIOTICS
+
+# Association of all taxa_SP_filt with phenotypes
+
+pheno_list <- c("prolonged_rupt", "mmpercentage", "surgery", "ab48", "apgar_1",
+                "apgar_5", "multiple", "delivery_md", "maternal_atb", "mother_st_com",
+                "placenta_ab", "pe_hellp", "maternal_infect", "mother_b_hem",
+                "antibiotic_sample", "probiotic_sample", "ga_exact", "bw", "nec",
+                "sex", "admissiontime", "tpn_days", "sip", "sepsis_culture",
+                "pda_sign", "mortality", "week", "probiotics", "SGA",
+                "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx")
+
+taxa_sp_mixed_all_nopbtx <- mixed_models(metadata_infant, "ID", taxa_sp_filt_CLR, pheno_list)
+
+write.table(taxa_sp_mixed_all_nopbtx, "taxa_sp_mixed_all_nopbtx.txt", sep="\t", row.names=F, quote = F)
+
+# taxa with PC
+taxa_sp_PC_nopbtx <- mixed_models(phenos_imputed_div_pc_CLR, "ID", taxa_sp_filt_CLR, c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10", "PC11", "PC12", "PC13", "PC14", "PC15", "PC16" ,"PC17", "PC18","PC19", "PC20"))
+
+write.table(taxa_sp_PC_nopbtx, "taxa_sp_PC_nopbtx.txt", sep="\t", row.names=F, quote = F)
+
+#association of metadata with PCs
+
+mypcoa_df_CLR_nopbtx <- mixed_models(metadata_infant, "ID", mypcoa_df_CLR, pheno_list)
+
+write.table(mypcoa_df_CLR_nopbtx, "mypcoa_df_CLR_nopbtx.txt", sep="\t", row.names=F, quote = F)
+
+# Association of all taxa_SP_filt phenotypes
+
+alpha_diversity_nopbtx <- mixed_models(metadata_infant, "ID", my_alpha_diversity, pheno_list)
+
+write.table(alpha_diversity_nopbtx , "alpha_diversity_nopbtx.txt", sep="\t", row.names=F, quote = F)
+```
+
+```{r}
+#NOPROBIOTICS #PRENEC
+
+# Association of all taxa_SP_filt with phenotypes
+
+pheno_list <- c("prolonged_rupt", "mmpercentage", "surgery", "ab48", "apgar_1",
+                "apgar_5", "multiple", "delivery_md", "maternal_atb", "mother_st_com",
+                "placenta_ab", "pe_hellp", "maternal_infect", "mother_b_hem",
+                "antibiotic_sample", "probiotic_sample", "ga_exact", "bw", "nec",
+                "sex", "admissiontime", "tpn_days", "sip", "sepsis_culture",
+                "pda_sign", "mortality", "week", "probiotics", "SGA",
+                "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx")
+
+taxa_sp_mixed_all_nopbtx <- mixed_models(metadata_infant, "ID", taxa_sp_filt_CLR, pheno_list)
+
+write.table(taxa_sp_mixed_all_nopbtx, "taxa_sp_mixed_all_nopbtx_prenec.txt", sep="\t", row.names=F, quote = F)
+
+# taxa with PC
+taxa_sp_PC_nopbtx <- mixed_models(phenos_imputed_div_pc_CLR, "ID", taxa_sp_filt_CLR, c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6", "PC7", "PC8", "PC9", "PC10", "PC11", "PC12", "PC13", "PC14", "PC15", "PC16" ,"PC17", "PC18","PC19", "PC20"))
+
+write.table(taxa_sp_PC_nopbtx, "taxa_sp_PC_prenec.txt", sep="\t", row.names=F, quote = F)
+
+#association of metadata with PCs
+
+mypcoa_df_CLR_nopbtx <- mixed_models(metadata_infant, "ID", mypcoa_df_CLR, pheno_list)
+
+write.table(mypcoa_df_CLR_nopbtx, "mypcoa_df_CLR_nopbtx.txt", sep="\t", row.names=F, quote = F)
+
+# Association of all taxa_SP_filt phenotypes
+
+alpha_diversity_nopbtx <- mixed_models(metadata_infant, "ID", my_alpha_diversity, pheno_list)
+
+write.table(alpha_diversity_nopbtx , "alpha_diversity_nopbtx_prenec.txt", sep="\t", row.names=F, quote = F)
+```
+
+```{r}
+#NEC ONLY 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Within-NEC: does E. coli / K. pneumoniae status structure composition (PCoA)?
+#   Model per axis:  PC ~ ecoli + kleb + (1|MM_ID)   on NEC+ samples only
+#   Each bug is adjusted for the other; LRT p-values; BH-FDR across axes.
+# ══════════════════════════════════════════════════════════════════════════════
+lmer <- lme4::lmer   # unmasked by lmerTest
+
+# ── 1. Filter to NEC+ samples (ecoli/kleb already encoded in 4D block) ─────────
+nec_dat <- phenos_imputed_div_pc_CLR %>%
+  filter(nec == "Yes",
+         !is.na(ecoli), !is.na(kleb), !is.na(MM_ID))
+
+cat(sprintf("NEC+ samples: %d  across %d infants\n",
+            nrow(nec_dat), dplyr::n_distinct(nec_dat$MM_ID)))
+print(table(E.coli = nec_dat$ecoli, K.pneumoniae = nec_dat$kleb))
+
+# Repeated-measures sanity check: a mixed model only makes sense if some infants
+# contribute >1 sample. If it's one-per-infant, switch (1|MM_ID) -> plain lm().
+spi <- table(nec_dat$MM_ID)
+cat(sprintf("Samples per infant: median %g, range %d-%d (%d infants with >1)\n",
+            median(spi), min(spi), max(spi), sum(spi > 1)))
+
+# ── 2. Which axes to test ──────────────────────────────────────────────────────
+pc_cols <- grep("^PC[0-9]+$", names(nec_dat), value = TRUE)
+pc_cols <- pc_cols[order(as.integer(sub("PC", "", pc_cols)))]
+# To match the figure (PC1/PC2 only): pc_cols <- c("PC1", "PC2")
+cat("Testing axes:", paste(pc_cols, collapse = ", "), "\n")
+
+# ── 3. Fit PC ~ ecoli + kleb + (1|MM_ID); LRT for each bug ─────────────────────
+res <- lapply(pc_cols, function(pc) {
+  d <- nec_dat; d$y <- d[[pc]]
+  d <- d[!is.na(d$y), ]
+  full  <- suppressMessages(lmer(y ~ ecoli + kleb + (1 | MM_ID), data = d, REML = FALSE))
+  r_ec  <- suppressMessages(lmer(y ~          kleb + (1 | MM_ID), data = d, REML = FALSE))
+  r_kl  <- suppressMessages(lmer(y ~ ecoli        + (1 | MM_ID), data = d, REML = FALSE))
+  cf <- summary(full)$coefficients
+  data.frame(
+    PC        = pc,
+    ecoli_t   = cf["ecoli", "t value"],
+    ecoli_p   = anova(r_ec, full)$`Pr(>Chisq)`[2],
+    kleb_t    = cf["kleb",  "t value"],
+    kleb_p    = anova(r_kl, full)$`Pr(>Chisq)`[2]
+  )
+})
+res <- do.call(rbind, res)
+
+# ── 4. BH-FDR across axes, per bug ─────────────────────────────────────────────
+res$ecoli_FDR <- p.adjust(res$ecoli_p, "BH")
+res$kleb_FDR  <- p.adjust(res$kleb_p,  "BH")
+res <- res %>% arrange(pmin(ecoli_FDR, kleb_FDR))
+
+cat("\n── PC ~ E. coli + K. pneumoniae status, NEC+ only ──\n")
+print(res, row.names = FALSE, digits = 3)
+```
+
+
+```{r}
+metadata_PC <- read.delim("mypcoa_df_CLR_nopbtx.txt")
+metadata_PC<-metadata_PC%>% filter(Pheno=="")
+
+alpha_diversity <- read.delim("alpha_diversity_nopbtx_prenec.txt")
+alpha_diversity<-alpha_diversity%>% filter(Pheno=="nec")
+
+taxa_nopbtx <- read.delim("taxa_sp_mixed_all_nopbtx.txt")
+taxa_nopbtx<-taxa_nopbtx%>% filter(Pheno=="nec")
+
+taxa_sp_PC_nopbtx<-read.delim("taxa_sp_PC_nopbtx.txt")
+taxa_sp_PC_nopbtx<-taxa_sp_PC_nopbtx%>% filter(Pheno=="nec")
+```
+
+
+```{r}
+# =============================================================================
+# PERMANOVA (adonis2) — association of clinical/exposure variables
+# with bacterial composition (CLR PCoA coordinates PC1–PC20)
+# Corrected for DNA concentration; BH-FDR across variables
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Define variables
+# -----------------------------------------------------------------------------
+pheno_vars <- c("prolonged_rupt", "mmpercentage", "surgery", "ab48",
+                "apgar_1", "apgar_5", "multiple", "delivery_md",
+                "maternal_atb", "mother_st_com", "placenta_ab", "pe_hellp",
+                "maternal_infect", "mother_b_hem", "antibiotic_sample",
+                "probiotic_sample", "ga_exact", "bw", "nec", "sex",
+                "admissiontime", "tpn_days", "sip", "sepsis_culture",
+                "pda_sign", "mortality", "week", "probiotics", "SGA",
+                "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx",
+                "alcohol", "smoking", "education_level", "cigarettes_day")
+
+pc_vars <- paste0("PC", 1:20)
+
+# -----------------------------------------------------------------------------
+# 2. Prepare the PCoA distance matrix
+# -----------------------------------------------------------------------------
+pc_mat <- phenos_imputed_div_pc_CLR %>%
+  as.data.frame() %>%                          # ensure plain data frame
+  select(ID, all_of(pc_vars)) %>%
+  filter(complete.cases(.))
+
+# Set rownames explicitly rather than via column_to_rownames
+rownames(pc_mat) <- pc_mat$ID
+pc_mat$ID        <- NULL
+pc_mat           <- as.matrix(pc_mat)
+
+dist_ait <- dist(pc_mat, method = "euclidean")
+cat(sprintf("Samples in distance matrix: %d\n", nrow(pc_mat)))
+
+# -----------------------------------------------------------------------------
+# 3. Align metadata_infant to the same sample IDs
+# -----------------------------------------------------------------------------
+meta_aligned <- metadata_infant %>%
+  as.data.frame() %>%                          # ensure plain data frame
+  filter(ID %in% rownames(pc_mat))
+
+rownames(meta_aligned) <- meta_aligned$ID
+meta_aligned$ID        <- NULL
+
+# Reorder to match distance matrix
+meta_aligned <- meta_aligned[rownames(pc_mat), , drop = FALSE]
+stopifnot(all(rownames(meta_aligned) == rownames(pc_mat)))
+
+cat(sprintf("Samples in aligned metadata: %d\n", nrow(meta_aligned)))
+
+# -----------------------------------------------------------------------------
+# 4. Run adonis2 for each variable, correcting for DNA_conc
+# -----------------------------------------------------------------------------
+set.seed(42)
+results <- list()
+
+for (var in pheno_vars) {
+
+  if (!var %in% colnames(meta_aligned)) {
+    cat(sprintf("Skipping %s — not found in metadata\n", var))
+    next
+  }
+
+  if (!"DNA_conc" %in% colnames(meta_aligned)) {
+    stop("DNA_conc not found in metadata_infant — check column name.")
+  }
+
+  # Complete cases for variable + DNA_conc
+  keep <- !is.na(meta_aligned[[var]]) &
+          !is.na(meta_aligned[["DNA_conc"]])
+
+  n_complete <- sum(keep)
+  if (n_complete < 10) {
+    cat(sprintf("Skipping %s — only %d complete cases\n", var, n_complete))
+    next
+  }
+
+  # Subset distance matrix and metadata
+  dist_sub <- as.dist(as.matrix(dist_ait)[keep, keep])
+  meta_sub  <- meta_aligned[keep, , drop = FALSE]
+
+  df_adonis <- data.frame(
+    y       = meta_sub[[var]],
+    dna_conc = as.numeric(as.character(meta_sub[["DNA_conc"]]))
+  )
+
+  fit <- tryCatch(
+    suppressWarnings(
+      adonis2(dist_sub ~ dna_conc + y, data = df_adonis,
+              permutations = 999, by = "margin")
+    ),
+    error = function(e) NULL
+  )
+
+  if (is.null(fit)) {
+    cat(sprintf("adonis2 failed for %s\n", var))
+    next
+  }
+
+  r2_row <- fit["y", ]
+
+  results[[var]] <- data.frame(
+    Variable = var,
+    N        = n_complete,
+    R2       = round(r2_row$R2,    4),
+    F_stat   = round(r2_row$F,     3),
+    p_value  = r2_row$`Pr(>F)`,
+    stringsAsFactors = FALSE
+  )
+}
+
+# -----------------------------------------------------------------------------
+# 5. Compile and apply BH-FDR correction
+# -----------------------------------------------------------------------------
+results_df <- bind_rows(results) %>%
+  arrange(p_value) %>%
+  mutate(
+    FDR     = p.adjust(p_value, method = "BH"),
+    Sig_FDR = case_when(
+      FDR < 0.001 ~ "***",
+      FDR < 0.01  ~ "**",
+      FDR < 0.05  ~ "*",
+      TRUE        ~ ""
+    )
+  )
+
+cat("\n=== PERMANOVA results (adonis2, corrected for DNA_conc, BH-FDR) ===\n")
+print(results_df, row.names = FALSE)
+
+# -----------------------------------------------------------------------------
+# 6. Export to Excel
+# -----------------------------------------------------------------------------
+write_xlsx(
+  list("PERMANOVA results" = results_df),
+  path = "PERMANOVA_composition_associations.xlsx"
+)
+cat("✓ Saved: PERMANOVA_composition_associations.xlsx\n")
+
+# -----------------------------------------------------------------------------
+# 7. Dot plot of results
+# -----------------------------------------------------------------------------
+p_perm <- results_df %>%
+  mutate(
+    Variable  = factor(Variable, levels = rev(Variable)),
+    Sig_label = ifelse(FDR < 0.05,
+                       sprintf("FDR=%.3f %s", FDR, Sig_FDR), "")
+  ) %>%
+  ggplot(aes(x = R2, y = Variable, colour = FDR < 0.05)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey70") +
+  geom_point(size = 2.5) +
+  geom_text(aes(label = Sig_label), hjust = -0.15, size = 2.8) +
+  scale_colour_manual(values = c("FALSE" = "grey60", "TRUE" = "#e76f51"),
+                      labels = c("ns", "FDR < 0.05"),
+                      name   = NULL) +
+  scale_x_continuous(expand = expansion(mult = c(0.02, 0.30))) +
+  labs(x        = "R² (variance explained)",
+       y        = NULL,
+       title    = "PERMANOVA: association with bacterial composition",
+       subtitle = "adonis2, corrected for DNA concentration, BH-FDR") +
+  theme_classic(base_size = 11) +
+  theme(plot.title      = element_text(face = "bold"),
+        legend.position = "bottom")
+
+print(p_perm)
+ggsave("PERMANOVA_composition_associations.pdf", p_perm,
+       width = 7, height = 9)
+cat("✓ Saved: PERMANOVA_composition_associations.pdf\n")
+```
+

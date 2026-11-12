@@ -1,0 +1,231 @@
+---
+title: "Supplementary Figure 3 — bile acids by postnatal week"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+# CODE_DIR: root of this repository, one level above this notebook.
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+CODE_DIR <- normalizePath("..")
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(zCompositions)
+library(lme4)
+library(lmerTest)
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# LEGEND NUMBERS — helper
+# ══════════════════════════════════════════════════════════════════════════════
+LEGEND_FILE <- "SuppFigure3_legend_numbers.txt"
+cat("Supplementary Figure 3 - legend numbers\nGenerated: ", format(Sys.time()), "\n",
+    file = LEGEND_FILE, sep = "")
+legend_out <- function(title, x = NULL) {
+  body <- if (is.null(x)) character(0) else if (is.character(x)) x
+          else utils::capture.output(print(as.data.frame(x), row.names = FALSE))
+  txt <- c("", paste0("=== ", title, " ==="), body)
+  cat(txt, sep = "\n"); cat(txt, sep = "\n", file = LEGEND_FILE, append = TRUE)
+  invisible(NULL)
+}
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA — identical to the Figure 1e bile acid preparation
+# ══════════════════════════════════════════════════════════════════════════════
+# Same inputs, same zero replacement and same CLR, so the values plotted here
+# are the ones behind Figure 1e; this panel only splits them by postnatal week.
+set.seed(42)
+
+PBC_248_resultaten <- read_excel("PBC_248_resultaten.xlsx")
+bili_ba            <- read_excel("bili.xlsx")
+
+id_ba <- PBC_248_resultaten %>%
+  select(Nr, ID, postnatal_day) %>%
+  mutate(Nr = gsub(" ", "-", Nr), MM_ID = ID, ID = Nr) %>%
+  select(-Nr)
+
+merged_ba   <- id_ba %>% left_join(bili_ba, by = "ID") %>% select(-ID)
+metadata_ba <- read.delim("metadata_cleaned_april.txt")
+row.names(metadata_ba) <- metadata_ba$ID
+metadata_infant_ba <- metadata_ba[grep("^B", rownames(metadata_ba)), ]
+
+bili_total_ba <- metadata_infant_ba %>%
+  left_join(merged_ba, by = c("MM_ID" = "MM_ID", "Postnatal_Age" = "postnatal_day"))
+
+ba_cols <- c("GLCA-3S","TLCA-3S","LCA","UDCA","HDCA","CDCA","DCA","CA","HCA",
+             "GLCA","GUDCA","GHDCA","GCDCA","GDCA","LCA-3S","GCA","TLCA",
+             "TUDCA","THDCA","TCDCA","TDCA","TCA")
+conjugated   <- c("GLCA-3S","TLCA-3S","GLCA","GUDCA","GHDCA","GCDCA","GDCA",
+                  "GCA","LCA-3S","TLCA","TUDCA","THDCA","TCDCA","TDCA","TCA")
+unconjugated <- c("LCA","UDCA","HDCA","CDCA","DCA","CA","HCA")
+stopifnot(length(setdiff(ba_cols, colnames(bili_total_ba))) == 0)
+
+clr_rows <- function(mat) {
+  L <- log(as.matrix(mat)); sweep(L, 1, rowMeans(L), "-")
+}
+
+ba_raw <- bili_total_ba %>% select(ID, all_of(ba_cols)) %>% column_to_rownames("ID")
+ba_raw[is.na(ba_raw)] <- 0
+ba_raw <- ba_raw[rowSums(ba_raw) > 0, colSums(ba_raw) > 0, drop = FALSE]
+
+ba_repl <- tryCatch(
+  as.matrix(cmultRepl(ba_raw, label = 0, method = "CZM",
+                      z.warning = 1, z.delete = FALSE, suppress.print = TRUE)),
+  error = function(e) { message("cmultRepl failed: ", conditionMessage(e)); NULL })
+if (is.null(ba_repl)) {
+  mult_repl <- function(mat) t(apply(mat, 1, function(x) {
+    pos <- x[x > 0]; if (!length(pos)) return(x)
+    x[x == 0] <- min(pos) / 2; x / sum(x) }))
+  ba_repl <- mult_repl(ba_raw)
+}
+rownames(ba_repl) <- rownames(ba_raw)
+
+ba_clr <- clr_rows(ba_repl); rownames(ba_clr) <- rownames(ba_raw)
+conj_set   <- intersect(conjugated,   colnames(ba_repl))
+unconj_set <- intersect(unconjugated, colnames(ba_repl))
+conj_unconj_lr <- log(rowSums(ba_repl[, conj_set,   drop = FALSE]) /
+                      rowSums(ba_repl[, unconj_set, drop = FALSE]))
+
+bili_clr_mat <- as.data.frame(ba_clr)
+bili_clr_mat$conj_unconj_lr <- conj_unconj_lr[rownames(bili_clr_mat)]
+
+legend_out("Supp 3 — bile acid table",
+           sprintf("samples with any bile acid > 0: %d | species retained: %d | zero replacement: %s | coordinates: %d (22 CLR + 1 log-ratio)",
+                   nrow(ba_raw), ncol(ba_raw),
+                   if (exists("mult_repl")) "min/2 (fallback)" else "cmultRepl CZM",
+                   ncol(bili_clr_mat)))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# Plot data: the five Figure 1e coordinates, split by postnatal week
+# ══════════════════════════════════════════════════════════════════════════════
+focus        <- c("conj_unconj_lr", "CA", "TCA", "CDCA", "TCDCA")
+focus_labels <- c("Con/Uncon", "CA", "TCA", "CDCA", "TCDCA")
+PROBIOTIC_COLS <- c(No = "#4a3aa7", Yes = "#199e70")
+PROBIOTIC_TINT <- c(No = "#dedcef", Yes = "#d6eee5")
+
+plot_df_week <- bili_clr_mat %>%
+  rownames_to_column("ID") %>%
+  select(ID, any_of(focus)) %>%
+  left_join(bili_total_ba %>% select(ID, MM_ID, probiotics, week), by = "ID") %>%
+  filter(!is.na(probiotics), !is.na(week)) %>%
+  pivot_longer(any_of(focus), names_to = "coord", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(probiotics = factor(probiotics, levels = c(0, 1), labels = c("No", "Yes")),
+         coord      = factor(coord, levels = focus, labels = focus_labels),
+         week       = factor(as.character(week), levels = as.character(1:8),
+                             labels = paste0("W", 1:8))) %>%
+  filter(!is.na(week))
+
+legend_out("Supp 3 — plotted samples / infants (total)",
+           plot_df_week %>% distinct(ID, MM_ID) %>%
+             dplyr::summarise(n_samples = dplyr::n(),
+                              n_infants = dplyr::n_distinct(MM_ID)))
+legend_out("Supp 3 — samples / infants per week and probiotic exposure",
+           plot_df_week %>% distinct(ID, MM_ID, week, probiotics) %>%
+             dplyr::group_by(week, probiotics) %>%
+             dplyr::summarise(n_samples = dplyr::n(),
+                              n_infants = dplyr::n_distinct(MM_ID), .groups = "drop"))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# FDR values — taken from the Figure 1e screen, so the two figures agree
+# ══════════════════════════════════════════════════════════════════════════════
+# 1E_bileacid_full_screen.csv is written by the Figure 1e chunk. These are
+# overall models across all weeks, Benjamini-Hochberg corrected across every
+# phenotype x coordinate pair; they are shown once per facet, not per week.
+SCREEN_FILE <- "1E_bileacid_full_screen.csv"
+
+fmt_p <- function(x) ifelse(is.na(x), "NA",
+                     ifelse(x < 0.001, "< 0.001", sprintf("%.3f", x)))
+
+if (file.exists(SCREEN_FILE)) {
+  screen <- read.csv(SCREEN_FILE)
+  lab_df <- screen %>%
+    filter(Pheno == "probiotics", BileAcid %in% focus) %>%
+    group_by(BileAcid) %>% slice_min(P, with_ties = FALSE) %>% ungroup() %>%
+    transmute(coord = factor(BileAcid, levels = focus, labels = focus_labels),
+              label = paste0("FDR = ", fmt_p(FDR)))
+  legend_out("Supp 3 — overall FDR per coordinate (from the Figure 1e screen)",
+             screen %>% filter(Pheno == "probiotics", BileAcid %in% focus) %>%
+               transmute(BileAcid, Beta = signif(Estimate, 3),
+                         P = signif(P, 3), FDR = signif(FDR, 3),
+                         N_samples, N_infants))
+} else {
+  lab_df <- tibble(coord = factor(character(0), levels = focus_labels),
+                   label = character(0))
+  warning(SCREEN_FILE, " not found - run the Figure 1e chunk first; ",
+          "the panel will be drawn without FDR labels.", call. = FALSE)
+}
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# Per-week tests (reported in the numbers file, not drawn on the figure)
+# ══════════════════════════════════════════════════════════════════════════════
+# Within a single week each infant contributes at most one sample in most
+# weeks, so a rank-sum test is used. These are a descriptive breakdown of the
+# overall models, corrected across the 5 coordinates x weeks tested.
+week_tests <- plot_df_week %>%
+  group_by(coord, week) %>%
+  dplyr::summarise(n_no  = sum(probiotics == "No"),
+                   n_yes = sum(probiotics == "Yes"),
+                   p_value = if (dplyr::n_distinct(probiotics) == 2 &&
+                                 min(table(probiotics)) >= 3)
+                     suppressWarnings(wilcox.test(value ~ probiotics,
+                                                  exact = FALSE)$p.value)
+                     else NA_real_,
+                   .groups = "drop") %>%
+  mutate(FDR_week = p.adjust(p_value, method = "BH"))
+
+legend_out("Supp 3 — per-week Wilcoxon (two-sided), BH across all coordinate x week tests",
+           week_tests %>% mutate(p_value = signif(p_value, 3),
+                                 FDR_week = signif(FDR_week, 3)))
+legend_out("Supp 3 — per-week tests summary",
+           sprintf("tests performed: %d | significant at FDR < 0.05: %d",
+                   sum(!is.na(week_tests$p_value)),
+                   sum(week_tests$FDR_week < 0.05, na.rm = TRUE)))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# Figure
+# ══════════════════════════════════════════════════════════════════════════════
+p_bile_week <- ggplot(plot_df_week, aes(week, value)) +
+  geom_boxplot(aes(fill = probiotics, colour = probiotics),
+               alpha = 0.9, outlier.shape = NA, linewidth = 0.4,
+               position = position_dodge(width = 0.8)) +
+  geom_point(aes(colour = probiotics), alpha = 0.6, size = 1.1,
+             shape = 16, stroke = 0,
+             position = position_jitterdodge(jitter.width = 0.2,
+                                             jitter.height = 0,
+                                             dodge.width = 0.8)) +
+  geom_text(data = lab_df, aes(x = Inf, y = Inf, label = label),
+            inherit.aes = FALSE, hjust = 1.05, vjust = 1.3, size = 2.6,
+            colour = "grey20") +
+  facet_wrap(~ coord, scales = "free_y", ncol = 1, strip.position = "right") +
+  scale_fill_manual(values = PROBIOTIC_TINT, name = "Probiotic exposure") +
+  scale_colour_manual(values = PROBIOTIC_COLS, name = "Probiotic exposure") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +
+  labs(x = "Postnatal week", y = "Log-ratio") +
+  theme_classic(base_size = 12) +
+  theme(strip.background = element_blank(),
+        strip.text       = element_text(face = "bold"),
+        legend.position  = "bottom",
+        panel.border     = element_rect(fill = NA, colour = "grey30", linewidth = 0.4),
+        panel.spacing.y  = unit(0.9, "lines"))
+
+print(p_bile_week)
+ggsave("S3_bileacid_probiotics_by_week.pdf", p_bile_week, width = 9, height = 11)
+cat("\n✓ Saved: S3_bileacid_probiotics_by_week.pdf and ", LEGEND_FILE, "\n", sep = "")
+sessionInfo()
+```

@@ -1,0 +1,417 @@
+---
+title: "Supplementary Figure 1"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+# CODE_DIR: root of this repository, one level above this notebook.
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+CODE_DIR <- normalizePath("..")
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+# Libraries
+library(tidyverse)
+library(vegan)
+library(lme4)
+library(lmerTest)
+library(viridis)
+library(ggExtra)
+library(dplyr)
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# LEGEND NUMBERS — helper
+# ══════════════════════════════════════════════════════════════════════════════
+LEGEND_FILE <- "SuppFigure1_legend_numbers.txt"
+cat("Supplementary Figure 1 - legend numbers\nGenerated: ", format(Sys.time()), "\n",
+    file = LEGEND_FILE, sep = "")
+legend_out <- function(title, x = NULL) {
+  body <- if (is.null(x)) character(0) else if (is.character(x)) x
+          else utils::capture.output(print(as.data.frame(x), row.names = FALSE))
+  txt <- c("", paste0("=== ", title, " ==="), body)
+  cat(txt, sep = "\n"); cat(txt, sep = "\n", file = LEGEND_FILE, append = TRUE)
+  invisible(NULL)
+}
+n_si <- function(df, ..., id = "MM_ID") {
+  df %>% dplyr::group_by(...) %>%
+    dplyr::summarise(n_samples = dplyr::n(),
+                     n_infants = dplyr::n_distinct(.data[[id]]), .groups = "drop")
+}
+
+# Likelihood-ratio test of one term in a mixed model, adjusted for the
+# technical covariates and postnatal age, with a random intercept per infant.
+# Used for every "overall" statement in the legend.
+lmm_term <- function(data, outcome, term, covs = c("Postnatal_Age", "Clean_reads_P1", "DNA_conc")) {
+  d <- data[stats::complete.cases(data[, c(outcome, term, covs, "MM_ID")]), , drop = FALSE]
+  for (v in covs) d[[paste0(v, "_z")]] <- as.numeric(scale(as.numeric(d[[v]])))
+  rhs0 <- paste(paste0(covs, "_z"), collapse = " + ")
+  m0 <- lmer(stats::as.formula(paste(outcome, "~", rhs0, "+ (1|MM_ID)")),
+             data = d, REML = FALSE)
+  m1 <- lmer(stats::as.formula(paste(outcome, "~", rhs0, "+", term, "+ (1|MM_ID)")),
+             data = d, REML = FALSE)
+  cf <- summary(m1)$coefficients
+  r  <- grep(paste0("^", term), rownames(cf))[1]
+  sprintf("n = %d samples / %d infants | effect = %.3f (SE %.3f) | LRT p = %.3g",
+          nrow(d), dplyr::n_distinct(d$MM_ID), cf[r, 1], cf[r, 2],
+          stats::anova(m1, m0)[["Pr(>Chisq)"]][2])
+}
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA — same preparation as Figure 1
+# ══════════════════════════════════════════════════════════════════════════════
+# The probiotic species are retained here: this figure describes the overall
+# diversity and composition of the cohort.
+metadata     <- read.delim("metadata_cleaned_april.txt")
+taxa_cleaned <- read.delim("taxa_cleaned_jan.txt")
+row.names(taxa_cleaned) <- taxa_cleaned$ID; taxa_cleaned$ID <- NULL
+row.names(metadata) <- metadata$ID
+
+metadata_infant <- metadata[grep("^B", rownames(metadata)), ]
+taxa_infant     <- taxa_cleaned[grep("^B", rownames(taxa_cleaned)), ]
+
+factor_vars <- c("prolonged_rupt", "surgery", "ab48", "multiple", "delivery_md",
+                 "maternal_atb", "mother_st_com", "placenta_ab", "pe_hellp",
+                 "maternal_infect", "mother_b_hem", "nec",
+                 "sex", "sip", "sepsis_culture", "pda_sign", "mortality",
+                 "pda", "probiotics", "SGA", "LGA", "FGR", "ivh", "abtx")
+numeric_vars <- c("mmpercentage", "probiotic_sample", "apgar_1", "apgar_5",
+                  "antibiotic_sample", "ga_exact", "bw", "admissiontime", "tpn_days",
+                  "TFEF_B", "TFEF", "DNA_conc", "Clean_reads_P1", "week",
+                  "Postnatal_Age", "MM_ID")
+metadata_infant[factor_vars]  <- lapply(metadata_infant[factor_vars], as.factor)
+metadata_infant[numeric_vars] <- lapply(metadata_infant[numeric_vars], as.numeric)
+
+taxa <- taxa_infant[row.names(taxa_infant) %in% rownames(metadata_infant), ]
+
+taxa_sp <- taxa[, grep("s__", colnames(taxa))]
+taxa_sp <- taxa_sp[, -grep("t__", colnames(taxa_sp))]
+colnames(taxa_sp) <- gsub(".*s__", "", colnames(taxa_sp))
+taxa_sp <- taxa_sp %>% mutate(across(everything(), ~ as.numeric(.)))
+
+richness <- plyr::ddply(taxa_sp, ~ rownames(taxa_sp),
+                        function(x) data.frame(RICHNESS = sum(x[-1] > 0, na.rm = TRUE)))
+row.names(richness) <- richness$`rownames(taxa_sp)`; richness$`rownames(taxa_sp)` <- NULL
+my_alpha_diversity <- data.frame(Shannon = diversity(taxa_sp, index = "shannon"),
+                                 Simpson = diversity(taxa_sp, index = "simpson"))
+my_alpha_diversity <- merge(my_alpha_diversity, richness, by = "row.names")
+row.names(my_alpha_diversity) <- my_alpha_diversity$Row.names
+my_alpha_diversity$Row.names <- NULL
+
+phenos_imputed_div <- merge(my_alpha_diversity, metadata_infant, by = "row.names")
+row.names(phenos_imputed_div) <- phenos_imputed_div$Row.names
+phenos_imputed_div$Row.names <- NULL
+
+# Prevalence filter: a species is kept if present above 0.05% in >= 1 infant
+taxa_sp$ID <- row.names(taxa_sp)
+taxa_sp$personal_ID <- sub("_.*", "", taxa_sp$ID)
+unique_counts <- sapply(taxa_sp, function(x)
+  length(unique(taxa_sp$personal_ID[x > 0.05])))
+taxa_sp_filt <- taxa_sp[, unique_counts >= 1]
+taxa_sp_filt$personal_ID <- NULL; taxa_sp_filt$ID <- NULL
+taxa_sp$personal_ID <- NULL; taxa_sp$ID <- NULL
+
+my_pseudocount_normal <- min(taxa_sp_filt[taxa_sp_filt != 0]) / 2
+
+# Align the taxa table to the phenotype table by row name.
+stopifnot(setequal(row.names(taxa_sp_filt), row.names(phenos_imputed_div)))
+taxa_sp_filt <- taxa_sp_filt[row.names(phenos_imputed_div), , drop = FALSE]
+
+my_distance_CLR  <- vegdist(taxa_sp_filt, method = "aitchison",
+                            pseudocount = my_pseudocount_normal)
+taxa_sp_filt_CLR <- decostand(taxa_sp_filt, "clr", pseudocount = my_pseudocount_normal)
+
+mypcoa_CLR <- cmdscale(my_distance_CLR, k = 20, eig = TRUE)
+my_var_CLR <- round(mypcoa_CLR$eig * 100 / sum(mypcoa_CLR$eig), 2)[1:20]
+mypcoa_df_CLR <- as.data.frame(mypcoa_CLR$points)
+names(mypcoa_df_CLR) <- paste0("PC", 1:20)
+
+phenos_imputed_div_pc_CLR <- merge(mypcoa_df_CLR, phenos_imputed_div, by = "row.names")
+row.names(phenos_imputed_div_pc_CLR) <- phenos_imputed_div_pc_CLR$Row.names
+
+# Shared factors
+mk_week <- function(x) factor(as.character(x), levels = as.character(1:8),
+                              labels = paste0("W", 1:8))
+phenos_imputed_div$week        <- mk_week(phenos_imputed_div$week)
+phenos_imputed_div_pc_CLR$week <- mk_week(phenos_imputed_div_pc_CLR$week)
+
+legend_out("Supp 1 — analysed infant samples", phenos_imputed_div %>% n_si())
+legend_out("Supp 1 — samples / infants per postnatal week",
+           phenos_imputed_div %>% n_si(week))
+legend_out("Supp 1 — species in the distance / CLR table",
+           sprintf("%d species (probiotic species retained); pseudocount %.3g | PCo1 %.2f%%, PCo2 %.2f%%",
+                   ncol(taxa_sp_filt), my_pseudocount_normal, my_var_CLR[1], my_var_CLR[2]))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# a — PCoA of Aitchison distances coloured by postnatal week
+# ══════════════════════════════════════════════════════════════════════════════
+all_infants   <- phenos_imputed_div_pc_CLR
+infant_colors <- viridis(8, option = "D")
+
+centroids <- do.call(rbind, lapply(levels(all_infants$week), function(w) {
+  s <- all_infants[all_infants$week == w, ]
+  data.frame(week = w, PC1 = mean(s$PC1), PC2 = mean(s$PC2))
+}))
+centroids$week <- factor(centroids$week, levels = levels(all_infants$week))
+
+# type = "t": the legend states a multivariate t-distribution. The earlier
+# version used type = "norm", which is the normal-theory ellipse.
+p_a <- ggplot(all_infants, aes(PC1, PC2, color = week, fill = week)) +
+  geom_point(size = 2) +
+  stat_ellipse(aes(group = week), type = "t", linetype = 2, geom = "path",
+               show.legend = FALSE) +
+  geom_point(data = centroids, aes(PC1, PC2, fill = week), shape = 23,
+             size = 4, color = "black") +
+  xlab(paste0("PCo1 = ", my_var_CLR[1], "%")) +
+  ylab(paste0("PCo2 = ", my_var_CLR[2], "%")) +
+  scale_color_manual(name = NULL, values = infant_colors) +
+  scale_fill_manual(name = NULL, values = infant_colors) +
+  theme(axis.line.x = element_line(), axis.line.y = element_line(),
+        legend.position = "bottom", legend.key = element_blank(),
+        legend.text = element_text(size = 14), axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = NA))
+
+p_a <- ggExtra::ggMarginal(p_a, type = "boxplot", groupColour = TRUE,
+                           fill = infant_colors)
+print(p_a)
+ggsave("S1a_PCoA_week.pdf", p_a, width = 6, height = 5, dpi = 300)
+
+d_a <- all_infants %>% filter(!is.na(week), !is.na(Clean_reads_P1), !is.na(DNA_conc))
+set.seed(42)
+ad_a <- adonis2(as.dist(as.matrix(my_distance_CLR)[rownames(d_a), rownames(d_a)]) ~
+                  Clean_reads_P1 + DNA_conc + week,
+                data = d_a, permutations = 10000, by = "margin")
+legend_out("Supp 1a — PERMANOVA, postnatal week (marginal SS, + reads + DNA conc, 10,000 permutations)",
+           sprintf("n = %d samples / %d infants | Df = %d | R2 = %.4f | F = %.2f | p = %.3g",
+                   nrow(d_a), dplyr::n_distinct(d_a$MM_ID), ad_a["week", "Df"],
+                   ad_a["week", "R2"], ad_a["week", "F"], ad_a["week", "Pr(>F)"]))
+legend_out("Supp 1a — samples per week (points in the plot)", all_infants %>% n_si(week))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# b — Shannon diversity by postnatal week, stratified by gestational age
+# ══════════════════════════════════════════════════════════════════════════════
+phenos_imputed_div$gestation <- factor(
+  ifelse(phenos_imputed_div$ga_exact < 28, 0, 1),
+  levels = c(0, 1), labels = c("<28 weeks", "≥28 weeks"))
+
+# Per-week Wilcoxon, BH across the weeks that could be tested.
+week_tests <- function(data, group_var, min_n = 3) {
+  res <- purrr::map_dfr(levels(data$week), function(w) {
+    d <- data[data$week == w & !is.na(data[[group_var]]) & !is.na(data$Shannon), ]
+    g <- droplevels(factor(d[[group_var]]))
+    n <- table(g)
+    if (nlevels(g) < 2 || any(n < min_n))
+      return(tibble(week = w, n1 = unname(n[1]), n2 = if (length(n) > 1) unname(n[2]) else NA,
+                    p_value = NA_real_))
+    tibble(week = w, n1 = unname(n[1]), n2 = unname(n[2]),
+           p_value = suppressWarnings(
+             stats::wilcox.test(d$Shannon ~ g, exact = FALSE)$p.value))
+  })
+  res$p_adj <- NA_real_
+  ok <- !is.na(res$p_value)
+  res$p_adj[ok] <- stats::p.adjust(res$p_value[ok], method = "BH")
+  res$significance <- cut(res$p_adj, c(-Inf, .001, .01, .05, Inf),
+                          labels = c("***", "**", "*", ""), right = FALSE)
+  res$significance[is.na(res$p_adj)] <- NA
+  res
+}
+
+stats_b <- week_tests(phenos_imputed_div, "gestation")
+max_y <- phenos_imputed_div %>% group_by(week) %>%
+  dplyr::summarise(label_y = max(Shannon, na.rm = TRUE) + 0.2, .groups = "drop")
+stats_b <- left_join(stats_b, max_y, by = "week")
+
+plot_b <- phenos_imputed_div %>% filter(!is.na(gestation), !is.na(Shannon), !is.na(week))
+p_b <- ggplot(plot_b, aes(week, Shannon, fill = gestation, color = gestation)) +
+  geom_boxplot(alpha = 0.4, outlier.colour = NA, position = position_dodge(width = 0.8)) +
+  geom_point(alpha = 0.6, position = position_jitterdodge(jitter.width = 0.3,
+                                                          jitter.height = 0,
+                                                          dodge.width = 0.8)) +
+  geom_text(data = subset(stats_b, !is.na(significance) & significance != ""),
+            aes(x = week, y = label_y, label = significance),
+            inherit.aes = FALSE, size = 5) +
+  scale_fill_manual(values = c("#fa2b13", "#54b7a6")) +
+  scale_color_manual(values = c("#fa2b13", "#54b7a6")) +
+  labs(x = "Postnatal week", y = "Shannon diversity index",
+       fill = "Gestational age", color = "Gestational age") +
+  theme_bw() +
+  theme(axis.title = element_text(color = "black", size = 16),
+        axis.text.y = element_text(size = 12),
+        axis.text.x = element_text(size = 12, angle = 60, hjust = 1),
+        legend.position = "bottom")
+print(p_b)
+ggsave("S1b_shannon_gestational_age.pdf", p_b, width = 6, height = 5, dpi = 300)
+
+legend_out("Supp 1b — samples / infants per week and gestational age group",
+           plot_b %>% n_si(week, gestation))
+legend_out("Supp 1b — per-week Wilcoxon (two-sided), BH across weeks tested",
+           stats_b %>% transmute(week, n_lt28 = n1, n_ge28 = n2,
+                                 p_value = signif(p_value, 3), p_adj = signif(p_adj, 3)))
+legend_out("Supp 1b — overall LMM: Shannon ~ gestational age group + age + reads + DNA conc + (1|infant)",
+           lmm_term(plot_b, "Shannon", "gestation"))
+legend_out("Supp 1b — overall LMM with gestational age as a continuous variable",
+           lmm_term(phenos_imputed_div, "Shannon", "ga_exact"))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# c — Shannon diversity against days of antibiotic exposure (continuous)
+# ══════════════════════════════════════════════════════════════════════════════
+plot_c <- phenos_imputed_div %>% filter(!is.na(antibiotic_sample), !is.na(Shannon))
+
+p_c <- ggplot(plot_c, aes(antibiotic_sample, Shannon)) +
+  geom_point(aes(color = week), alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "grey70",
+              linewidth = 0.6, alpha = 0.25) +
+  scale_color_viridis_d(name = "Week", option = "D") +
+  labs(x = "Days of antibiotic exposure", y = "Shannon diversity index") +
+  theme_bw() +
+  theme(axis.title = element_text(color = "black", size = 16),
+        axis.text = element_text(size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "bottom")
+print(p_c)
+ggsave("S1c_shannon_antibiotic_continuous.pdf", p_c, width = 6, height = 5, dpi = 300)
+
+# The smoother is a straight line (lm), matching the model reported below.
+legend_out("Supp 1c — LMM: Shannon ~ days of antibiotics + age + reads + DNA conc + (1|infant)",
+           lmm_term(plot_c, "Shannon", "antibiotic_sample"))
+legend_out("Supp 1c — days of antibiotics",
+           sprintf("n = %d samples / %d infants | median %g, range %g-%g days",
+                   nrow(plot_c), dplyr::n_distinct(plot_c$MM_ID),
+                   median(plot_c$antibiotic_sample), min(plot_c$antibiotic_sample),
+                   max(plot_c$antibiotic_sample)))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# d — Shannon diversity by duration of antibiotic exposure (<3 vs >=3 days)
+# ══════════════════════════════════════════════════════════════════════════════
+phenos_imputed_div$antibiotic <- factor(
+  ifelse(phenos_imputed_div$antibiotic_sample < 3, 0, 1),
+  levels = c(0, 1), labels = c("<3 days", "≥3 days"))
+
+stats_d  <- week_tests(phenos_imputed_div, "antibiotic")
+stats_d  <- left_join(stats_d, max_y, by = "week")
+plot_d   <- phenos_imputed_div %>% filter(!is.na(antibiotic), !is.na(Shannon), !is.na(week))
+
+p_d <- ggplot(plot_d, aes(week, Shannon, fill = antibiotic, color = antibiotic)) +
+  geom_boxplot(alpha = 0.4, outlier.colour = NA, position = position_dodge(width = 0.8)) +
+  geom_point(alpha = 0.6, position = position_jitterdodge(jitter.width = 0.3,
+                                                          jitter.height = 0,
+                                                          dodge.width = 0.8)) +
+  geom_text(data = subset(stats_d, !is.na(significance) & significance != ""),
+            aes(x = week, y = label_y, label = significance),
+            inherit.aes = FALSE, size = 5) +
+  scale_fill_manual(values = c("#5AAE61", "#D4B3E9")) +
+  scale_color_manual(values = c("#5AAE61", "#D4B3E9")) +
+  labs(x = "Postnatal week", y = "Shannon diversity index",
+       fill = "Antibiotic exposure", color = "Antibiotic exposure") +
+  theme_bw() +
+  theme(axis.title = element_text(color = "black", size = 16),
+        axis.text.y = element_text(size = 12),
+        axis.text.x = element_text(size = 12, angle = 60, hjust = 1),
+        legend.position = "bottom")
+print(p_d)
+ggsave("S1d_shannon_antibiotic_groups.pdf", p_d, width = 6, height = 5, dpi = 300)
+
+legend_out("Supp 1d — samples / infants per week and antibiotic group",
+           plot_d %>% n_si(week, antibiotic))
+legend_out("Supp 1d — per-week Wilcoxon (two-sided), BH across weeks tested",
+           stats_d %>% transmute(week, n_lt3 = n1, n_ge3 = n2,
+                                 p_value = signif(p_value, 3), p_adj = signif(p_adj, 3)))
+legend_out("Supp 1d — overall LMM: Shannon ~ antibiotic group + age + reads + DNA conc + (1|infant)",
+           lmm_term(plot_d, "Shannon", "antibiotic"))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# e — PCoA of Aitchison distances coloured by mode of delivery
+# ══════════════════════════════════════════════════════════════════════════════
+phenos_imputed_div_pc_CLR$delivery <- factor(
+  ifelse(phenos_imputed_div_pc_CLR$delivery_md == 0, "Vaginal", "Caesarean"),
+  levels = c("Vaginal", "Caesarean"))
+
+plot_e <- phenos_imputed_div_pc_CLR %>% filter(!is.na(delivery))
+
+p_e <- ggplot(plot_e, aes(PC1, PC2, color = delivery, fill = delivery)) +
+  geom_point(size = 2, alpha = 0.85) +
+  stat_ellipse(aes(group = delivery), type = "t", linetype = 2, geom = "path",
+               show.legend = FALSE) +
+  xlab(paste0("PCo1 = ", my_var_CLR[1], "%")) +
+  ylab(paste0("PCo2 = ", my_var_CLR[2], "%")) +
+  scale_color_manual(name = "Delivery mode",
+                     values = c(Vaginal = "#ff7f0e", Caesarean = "#1f77b4")) +
+  scale_fill_manual(name = "Delivery mode",
+                    values = c(Vaginal = "#ff7f0e", Caesarean = "#1f77b4")) +
+  guides(color = guide_legend(override.aes = list(size = 4, shape = 16))) +
+  theme(axis.title = element_text(size = 14), axis.text = element_text(size = 12),
+        axis.line.x = element_line(), axis.line.y = element_line(),
+        legend.position = "bottom", legend.key = element_blank(),
+        legend.text = element_text(size = 14), legend.title = element_text(size = 14),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        panel.background = element_rect(fill = NA))
+
+p_e <- ggExtra::ggMarginal(p_e, type = "histogram", groupColour = FALSE,
+                           groupFill = TRUE,
+                           xparams = list(bins = 60, alpha = 0.8,
+                                          position = "identity", color = "white"),
+                           yparams = list(bins = 60, alpha = 0.8,
+                                          position = "identity", color = "white"))
+print(p_e)
+ggsave("S1e_PCoA_delivery_mode.pdf", p_e, width = 6, height = 5, dpi = 300)
+
+d_e <- plot_e %>% filter(!is.na(Clean_reads_P1), !is.na(DNA_conc), !is.na(Postnatal_Age))
+set.seed(42)
+ad_e <- adonis2(as.dist(as.matrix(my_distance_CLR)[rownames(d_e), rownames(d_e)]) ~
+                  Clean_reads_P1 + DNA_conc + Postnatal_Age + delivery,
+                data = d_e, permutations = 10000, by = "margin")
+legend_out("Supp 1e — samples / infants by delivery mode", plot_e %>% n_si(delivery))
+legend_out("Supp 1e — PERMANOVA, delivery mode (marginal SS, + reads + DNA conc + postnatal age)",
+           sprintf("n = %d samples / %d infants | R2 = %.4f | F = %.2f | p = %.3g",
+                   nrow(d_e), dplyr::n_distinct(d_e$MM_ID), ad_e["delivery", "R2"],
+                   ad_e["delivery", "F"], ad_e["delivery", "Pr(>F)"]))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# f — Shannon diversity against exposure to mother's own milk
+# ══════════════════════════════════════════════════════════════════════════════
+plot_f <- phenos_imputed_div %>% filter(!is.na(mmpercentage), !is.na(Shannon))
+
+p_f <- ggplot(plot_f, aes(mmpercentage, Shannon)) +
+  geom_point(aes(color = week), alpha = 0.7, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", fill = "grey70",
+              linewidth = 0.6, alpha = 0.25) +
+  scale_color_viridis_d(name = "Week", option = "D") +
+  labs(x = "Mother's own milk (%)", y = "Shannon diversity index") +
+  theme_bw() +
+  theme(axis.title = element_text(color = "black", size = 16),
+        axis.text = element_text(size = 12),
+        panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = "bottom")
+print(p_f)
+ggsave("S1f_shannon_MOM.pdf", p_f, width = 6, height = 5, dpi = 300)
+
+legend_out("Supp 1f — LMM: Shannon ~ mother's own milk (%) + age + reads + DNA conc + (1|infant)",
+           lmm_term(plot_f, "Shannon", "mmpercentage"))
+legend_out("Supp 1f — mother's own milk exposure",
+           sprintf("n = %d samples / %d infants | median %g%%, range %g-%g%%",
+                   nrow(plot_f), dplyr::n_distinct(plot_f$MM_ID),
+                   median(plot_f$mmpercentage), min(plot_f$mmpercentage),
+                   max(plot_f$mmpercentage)))
+
+cat("\n✓ Saved: S1a-S1f PDFs and ", LEGEND_FILE, "\n", sep = "")
+sessionInfo()
+```

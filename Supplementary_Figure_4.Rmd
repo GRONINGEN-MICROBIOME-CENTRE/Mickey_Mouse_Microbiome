@@ -1,0 +1,181 @@
+---
+title: "Supplementary Figure 4 — sequencing depth and all sample types"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+# CODE_DIR: root of this repository, one level above this notebook.
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+CODE_DIR <- normalizePath("..")
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(ggExtra)
+library(readr)
+
+# Pin the dplyr verbs: vegan and MASS both export select()/filter().
+select <- dplyr::select; filter <- dplyr::filter; mutate <- dplyr::mutate
+summarise <- dplyr::summarise; count <- dplyr::count; rename <- dplyr::rename
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# LEGEND NUMBERS — helper
+# ══════════════════════════════════════════════════════════════════════════════
+LEGEND_FILE <- "SuppFigure4_legend_numbers.txt"
+cat("Supplementary Figure 4 - legend numbers\nGenerated: ", format(Sys.time()), "\n",
+    file = LEGEND_FILE, sep = "")
+legend_out <- function(title, x = NULL) {
+  body <- if (is.null(x)) character(0) else if (is.character(x)) x
+          else utils::capture.output(print(as.data.frame(x), row.names = FALSE))
+  txt <- c("", paste0("=== ", title, " ==="), body)
+  cat(txt, sep = "\n"); cat(txt, sep = "\n", file = LEGEND_FILE, append = TRUE)
+  invisible(NULL)
+}
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# a — sequencing depth before cleaning, with the read-depth cut-off
+# ══════════════════════════════════════════════════════════════════════════════
+# Reads the pre-cleaning statistics file used by the data-cleaning notebook
+# (MM_KN_stats_final_2026.txt), so the histogram shows every sequenced sample,
+# including those later removed.
+# CUTOFF matches the cut-off applied in 01_data_cleaning.Rmd.
+RAW_META   <- "MM_KN_stats_final_2026.txt"
+ID_COL     <- "KN_ID"
+READ_COL   <- "Clean_reads_P1"
+CUTOFF     <- 3e6
+INFANT_ONLY <- TRUE   # the cleaning notebook plots the "^B" samples only
+
+raw <- readr::read_tsv(RAW_META, show_col_types = FALSE) %>% as.data.frame()
+rownames(raw) <- raw[[ID_COL]]
+stopifnot(READ_COL %in% colnames(raw))
+raw[[READ_COL]] <- as.numeric(as.character(raw[[READ_COL]]))
+raw <- raw[!is.na(raw[[READ_COL]]), , drop = FALSE]
+if (INFANT_ONLY) raw <- raw[grepl("^B", rownames(raw)), , drop = FALSE]
+
+below <- sum(raw[[READ_COL]] < CUTOFF)
+legend_out("Supp 4a — sequencing depth before cleaning",
+           sprintf("file: %s | samples plotted: %s | below %.1f million: %d (%.1f%%) | at or above: %d | median %.2f million, range %.2f-%.2f million",
+                   RAW_META, if (INFANT_ONLY) "infant only" else "all",
+                   CUTOFF / 1e6, below, 100 * below / nrow(raw),
+                   nrow(raw) - below, median(raw[[READ_COL]]) / 1e6,
+                   min(raw[[READ_COL]]) / 1e6, max(raw[[READ_COL]]) / 1e6))
+legend_out("Supp 4a — cut-off applied in 01_data_cleaning.Rmd",
+           "3,000,000 clean reads, with N300_00_11A7 retained as an exception.")
+if (below == 0)
+  warning("No sample falls below the cut-off - check that RAW_META is the ",
+          "pre-cleaning statistics file.", call. = FALSE)
+
+p_a <- ggplot(raw, aes(.data[[READ_COL]] / 1e6)) +
+  geom_histogram(bins = 60, fill = "#4a3aa7", colour = "white", linewidth = 0.2) +
+  geom_vline(xintercept = CUTOFF / 1e6, linetype = "dashed",
+             colour = "#e76f51", linewidth = 0.7) +
+  annotate("text", x = CUTOFF / 1e6, y = Inf,
+           label = sprintf(" %.0f million", CUTOFF / 1e6),
+           hjust = -0.05, vjust = 1.5, size = 3.5, colour = "#e76f51") +
+  labs(x = "Clean reads (millions)", y = "Samples") +
+  theme_classic(base_size = 12)
+print(p_a)
+ggsave("S4a_read_depth_histogram.pdf", p_a, width = 6, height = 4, dpi = 300)
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# b — PCoA of Aitchison distances, all sample types
+# ══════════════════════════════════════════════════════════════════════════════
+# Infant, maternal, probiotic product and the sequencing controls together, so
+# the controls can be seen to sit apart from the biological samples.
+PREV_ABUNDANCE <- 0.01   # % relative abundance counted as detected
+PREV_MIN_SAMP  <- 5      # a species is kept if detected in >= this many samples
+
+metadata     <- read.delim("metadata_cleaned_april.txt")
+taxa_cleaned <- read.delim("taxa_cleaned_jan.txt")
+rownames(taxa_cleaned) <- taxa_cleaned$ID; taxa_cleaned$ID <- NULL
+rownames(metadata) <- metadata$ID
+
+sp <- taxa_cleaned[, grep("s__", colnames(taxa_cleaned)), drop = FALSE]
+sp <- sp[, !grepl("t__", colnames(sp)), drop = FALSE]
+colnames(sp) <- gsub(".*s__", "", colnames(sp))
+sp <- sp %>% mutate(across(everything(), as.numeric))
+
+ids  <- intersect(rownames(metadata), rownames(sp))
+meta <- metadata[ids, , drop = FALSE]
+sp   <- sp[ids, , drop = FALSE]
+meta$SampleType <- factor(trimws(as.character(meta$SampleType)),
+                          levels = c("infant", "maternal", "probiotic",
+                                     "positive", "negative"))
+
+legend_out("Supp 4b — samples by type (all sequenced samples with a taxonomic profile)",
+           meta %>% count(SampleType, name = "n_samples"))
+
+# A control with no species at all cannot be placed in an ordination.
+empty <- rownames(sp)[rowSums(sp, na.rm = TRUE) == 0]
+if (length(empty)) {
+  legend_out("Supp 4b — samples with no species detected (excluded from the PCoA)",
+             meta[empty, , drop = FALSE] %>%
+               transmute(ID, SampleType) %>% arrange(SampleType))
+  keep_ids <- setdiff(rownames(sp), empty)
+  sp <- sp[keep_ids, , drop = FALSE]; meta <- meta[keep_ids, , drop = FALSE]
+}
+
+detected <- colSums(sp > PREV_ABUNDANCE, na.rm = TRUE)
+sp_keep  <- sp[, detected >= PREV_MIN_SAMP, drop = FALSE]
+pseudo   <- min(sp_keep[sp_keep != 0]) / 2
+dist_all <- vegdist(sp_keep, method = "aitchison", pseudocount = pseudo)
+
+pcoa <- cmdscale(dist_all, k = 2, eig = TRUE)
+vv   <- round(pcoa$eig * 100 / sum(pcoa$eig), 2)
+pdf_df <- as.data.frame(pcoa$points) %>% setNames(c("PC1", "PC2")) %>%
+  rownames_to_column(".sample") %>%
+  left_join(tibble(.sample = rownames(meta), SampleType = meta$SampleType),
+            by = ".sample")
+
+TYPE_COLS <- c(infant = "#3288BD", maternal = "#A6DDB7", probiotic = "#5AAE61",
+               positive = "#D4B3E9", negative = "#F97B72")
+
+p_b <- ggplot(pdf_df, aes(PC1, PC2, colour = SampleType, fill = SampleType)) +
+  geom_point(size = 2, alpha = 0.85) +
+  # Ellipses only for the groups large enough to support one.
+  stat_ellipse(data = ~ subset(.x, SampleType %in%
+                 names(which(table(pdf_df$SampleType) >= 10))),
+               aes(group = SampleType), type = "t", linetype = 2,
+               geom = "path", show.legend = FALSE) +
+  scale_colour_manual(name = "Sample type", values = TYPE_COLS, drop = FALSE) +
+  scale_fill_manual(name = "Sample type", values = TYPE_COLS, drop = FALSE) +
+  guides(colour = guide_legend(override.aes = list(size = 4))) +
+  labs(x = paste0("PCo1 = ", vv[1], "%"), y = paste0("PCo2 = ", vv[2], "%")) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid = element_blank())
+
+p_b <- ggExtra::ggMarginal(p_b, type = "histogram", groupColour = FALSE,
+                           groupFill = TRUE,
+                           xparams = list(bins = 60, alpha = 0.8,
+                                          position = "identity", color = "white"),
+                           yparams = list(bins = 60, alpha = 0.8,
+                                          position = "identity", color = "white"))
+print(p_b)
+ggsave("S4b_PCoA_sample_type.pdf", p_b, width = 6, height = 5, dpi = 300)
+
+legend_out("Supp 4b — ordination",
+           sprintf("%d samples | %d of %d species (detected above %.2f%% in >= %d samples) | PCo1 %.2f%%, PCo2 %.2f%%",
+                   nrow(sp_keep), ncol(sp_keep), ncol(sp), PREV_ABUNDANCE,
+                   PREV_MIN_SAMP, vv[1], vv[2]))
+
+# Do the sample types separate? Controls are few, so this is descriptive.
+set.seed(42)
+ad <- adonis2(dist_all ~ SampleType, data = meta, permutations = 10000,
+              by = "margin")
+legend_out("Supp 4b — PERMANOVA, sample type (10,000 permutations)",
+           sprintf("n = %d | Df = %d | R2 = %.4f | F = %.2f | p = %.3g",
+                   nrow(sp_keep), ad["SampleType", "Df"], ad["SampleType", "R2"],
+                   ad["SampleType", "F"], ad["SampleType", "Pr(>F)"]))
+
+cat("\n✓ Saved: S4a, S4b and ", LEGEND_FILE, "\n", sep = "")
+sessionInfo()
+```

@@ -1,0 +1,2949 @@
+---
+title: "R Notebook - Figure 1 Final"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+# CODE_DIR: root of this repository, one level above this notebook.
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+CODE_DIR <- normalizePath("..")
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+# Load necessary libraries
+
+library(tidyverse)
+library(reshape2)
+library(openxlsx)
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(mgcv)
+library(vegan)
+library(EnvStats)
+library(foreach)
+library(RColorBrewer)
+library(wesanderson)
+library(viridis)
+library(ggrepel)
+library(ggpubr)
+library(ggExtra)
+library(pheatmap)
+library(vtable)
+library(dplyr)
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# LEGEND NUMBERS — helper
+# ══════════════════════════════════════════════════════════════════════════════
+# Every panel below writes the sample sizes and test details its legend needs
+# to the console AND to one text file, so the legend can be checked against a
+# single readout. The file is overwritten each time the notebook is run.
+LEGEND_FILE <- "Figure1_legend_numbers.txt"
+cat("Figure 1 / Supplementary Figure 1 — legend numbers\n",
+    "Generated: ", format(Sys.time()), "\n", file = LEGEND_FILE, sep = "")
+
+legend_out <- function(title, x = NULL) {
+  body <- if (is.null(x)) character(0)
+          else if (is.character(x)) x
+          else utils::capture.output(print(as.data.frame(x), row.names = FALSE))
+  txt <- c("", paste0("=== ", title, " ==="), body)
+  cat(txt, sep = "\n")
+  cat(txt, sep = "\n", file = LEGEND_FILE, append = TRUE)
+  invisible(NULL)
+}
+
+# n samples / n infants for a data frame, optionally by group
+n_si <- function(df, ..., id = "MM_ID") {
+  df %>% dplyr::group_by(...) %>%
+    dplyr::summarise(n_samples = dplyr::n(),
+                     n_infants = dplyr::n_distinct(.data[[id]]), .groups = "drop")
+}
+```
+
+```{r}
+# mixed_models(): per-feature linear mixed models. See R/mixed_models.R.
+source(file.path(CODE_DIR, "R", "mixed_models.R"))
+```
+
+```{r}
+# Load the data
+metadata <- read.table("meta_with_placental_subtypes.txt", header = TRUE, quote = "\"", na.strings = c("NA", ""), stringsAsFactors = FALSE, comment.char = "")
+
+metadata_selected<-metadata%>% select (ID, MM_ID, Postnatal_Age, mmpercentage, family_group, multiple, placental_weight)
+write.table(metadata_selected, "metadata_selected.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+taxa_cleaned <- read.delim("taxa_cleaned_jan.txt")
+row.names(taxa_cleaned)<-taxa_cleaned$ID
+taxa_cleaned$ID=NULL
+row.names(metadata)<-metadata$ID
+metadata_infant <- metadata[grep("^B", rownames(metadata)), ]
+taxa_infant <- taxa_cleaned[grep("^B", rownames(taxa_cleaned)), ]
+
+# Factors (categorical/binary variables)
+factor_vars <- c("prolonged_rupt", "surgery", "ab48", "multiple", "delivery_md",
+                 "maternal_atb", "mother_st_com", "placenta_ab", "pe_hellp",
+                 "maternal_infect", "mother_b_hem", "nec",
+                 "sex", "sip", "sepsis_culture", "pda_sign", "mortality",
+                 "pda", "probiotics", "SGA", "LGA", "FGR", "ivh", "abtx")
+
+# Numeric (continuous variables)
+numeric_vars <- c("mmpercentage", "probiotic_sample","apgar_1", "apgar_5", "antibiotic_sample", "ga_exact", "bw", "admissiontime", "tpn_days", "TFEF_B", "TFEF", "DNA_conc","Clean_reads_P1", "week", "Postnatal_Age", "MM_ID" )
+
+# Apply to dataframe
+metadata_infant[factor_vars] <- lapply(metadata_infant[factor_vars], as.factor)
+metadata_infant[numeric_vars] <- lapply(metadata_infant[numeric_vars], as.numeric)
+
+# Verify
+str(metadata_infant[, c(factor_vars, numeric_vars)])
+
+taxa=taxa_infant[row.names(taxa_infant)%in% rownames(metadata_infant),] # Only taxa present in infants 
+setdiff (rownames(taxa), rownames(metadata_infant)) # all good 
+
+taxa_sp=taxa
+taxa_sp=taxa_sp[,grep("s__",colnames(taxa_sp))]
+taxa_sp=taxa_sp[,-grep("t__",colnames(taxa_sp))]
+taxa_sub_species<-taxa[,grep("t__",colnames(taxa))]
+
+taxa_genus=taxa
+taxa_genus=taxa_genus[,grep("g__",colnames(taxa_genus))]
+taxa_genus=taxa_genus[,-grep("s__",colnames(taxa_genus))]
+
+#Simplify names
+colnames(taxa_sp)=gsub(".*s__","",colnames(taxa_sp))
+colnames(taxa_sub_species)=gsub(".*t__","",colnames(taxa_sub_species))
+colnames(taxa_genus)=gsub(".*g__","",colnames(taxa_genus))
+
+#taxa_sp$Bifidobacterium_longum=NULL
+#taxa_sp$Bifidobacterium_animalis=NULL
+#taxa_sp$Streptococcus_thermophilus=NULL
+
+taxa_sp <- taxa_sp %>% mutate(across(everything(), ~ as.numeric(.)))
+taxa_sub_species <- taxa_sub_species %>% mutate(across(everything(), ~ as.numeric(.)))
+
+richness <- plyr::ddply(taxa_sp,~rownames(taxa_sp),function(x) {
+  data.frame(RICHNESS=sum(x[-1]>0, na.rm = T))})
+row.names(richness)<-richness$`rownames(taxa_sp)`
+richness$`rownames(taxa_sp)`=NULL
+my_alpha_diversity=data.frame(Shannon=diversity(taxa_sp, index = "shannon"), Simpson=diversity(taxa_sp, index = "simpson"))
+my_alpha_diversity=merge(my_alpha_diversity, richness, by="row.names")
+row.names(my_alpha_diversity)=my_alpha_diversity$Row.names
+my_alpha_diversity$Row.names=NULL
+
+phenos_imputed_div=merge(my_alpha_diversity, metadata_infant, by="row.names")
+row.names(phenos_imputed_div)=phenos_imputed_div$Row.names
+phenos_imputed_div$Row.names=NULL
+
+taxa_sp$ID<-row.names(taxa_sp)
+taxa_sp$personal_ID<-sub ("_.*",  "",  taxa_sp$ID)
+unique_counts <- sapply(taxa_sp, function(x) length(unique(taxa_sp$personal_ID[x >0.05]))) 
+taxa_sp_filt <- taxa_sp[, unique_counts >= 1]  
+taxa_sp_filt$personal_ID=NULL
+taxa_sp_filt$ID=NULL
+
+#CLR Transformations
+my_pseudocount_normal=min(taxa_sp_filt[taxa_sp_filt!=0])/2
+
+# Align the taxa table to the phenotype table by row name.
+stopifnot(setequal(row.names(taxa_sp_filt), row.names(phenos_imputed_div)))
+taxa_sp_filt <- taxa_sp_filt[row.names(phenos_imputed_div), , drop = FALSE]
+my_distance_CLR=vegdist(taxa_sp_filt, method = "aitchison", pseudocount=my_pseudocount_normal) 
+taxa_sp_filt_CLR <- decostand(taxa_sp_filt, "clr", pseudocount=my_pseudocount_normal)
+mypcoa_CLR=cmdscale(my_distance_CLR, k = 20, eig = T)
+my_var_CLR=round(mypcoa_CLR$eig*100/sum(mypcoa_CLR$eig),2)[1:20]
+barplot (my_var_CLR)
+mypcoa_df_CLR=as.data.frame(mypcoa_CLR$points)
+names(mypcoa_df_CLR) <- c('PC1','PC2','PC3','PC4','PC5', 'PC6','PC7','PC8','PC9','PC10',
+                          'PC11','PC12','PC13','PC14','PC15', 'PC16','PC17','PC18','PC19','PC20')
+phenos_imputed_div_pc_CLR=merge(mypcoa_df_CLR,phenos_imputed_div, by="row.names")
+row.names (phenos_imputed_div_pc_CLR)<-phenos_imputed_div_pc_CLR$Row.names
+
+# ── LEGEND NUMBERS: cohort overview (Fig. 1a) and analysed sample set ─────────
+# Infant samples are selected here by the "^B" ID prefix and elsewhere by
+# SampleType == "infant"; the two definitions are checked against each other.
+meta_check <- read.table("meta_with_placental_subtypes.txt", header = TRUE,
+                         quote = "\"", na.strings = c("NA", ""),
+                         stringsAsFactors = FALSE, comment.char = "")
+by_prefix <- meta_check$ID[grepl("^B", meta_check$ID)]
+by_type   <- meta_check$ID[meta_check$SampleType == "infant"]
+legend_out("Infant definition check: '^B' prefix vs SampleType == 'infant'",
+           sprintf("prefix: %d | SampleType: %d | identical sets: %s",
+                   length(by_prefix), length(by_type),
+                   setequal(by_prefix, by_type)))
+
+legend_out("Fig 1a — sample types in metadata (samples; distinct MM_ID)",
+           meta_check %>% n_si(SampleType))
+
+cohort <- phenos_imputed_div %>% mutate(MM_ID = as.numeric(MM_ID))
+legend_out("Fig 1a / Fig 1c / Supp 1 — infant samples with metagenomes (total)",
+           cohort %>% n_si())
+legend_out("Fig 1a — per postnatal week",
+           cohort %>% n_si(week))
+legend_out("Fig 1a — samples per infant (median [IQR], range)",
+           {s <- table(cohort$MM_ID)
+            sprintf("median %g [IQR %g–%g], range %d–%d",
+                    median(s), quantile(s, .25), quantile(s, .75), min(s), max(s))})
+legend_out("Fig 1a — infants ever / never exposed to probiotics",
+           cohort %>% dplyr::group_by(MM_ID) %>%
+             dplyr::summarise(ever = any(probiotics == 1, na.rm = TRUE),
+                              never = all(probiotics == 0, na.rm = TRUE),
+                              .groups = "drop") %>%
+             dplyr::summarise(infants = dplyr::n(), ever_exposed = sum(ever),
+                              never_exposed = sum(never)))
+legend_out("Fig 1a — per probiotic status at sampling (samples; infants)",
+           cohort %>% n_si(probiotics))
+```
+```{r}
+
+# 1B Beta Diversity & PERMANOVA Analysis
+
+library(tidyverse)
+library(vegan)
+
+META_FILE <- "meta_with_placental_subtypes.txt"
+
+# plyr / plotly / lmerTest mask dplyr verbs — pin them
+select    <- dplyr::select
+filter    <- dplyr::filter
+mutate    <- dplyr::mutate
+summarise <- dplyr::summarise
+arrange   <- dplyr::arrange
+rename    <- dplyr::rename
+group_by  <- dplyr::group_by
+
+# ── Screening thresholds ──────────────────────────────────────────────────────
+MIN_LEVEL_INFANTS  <- 5      # distinct infants required in EACH level, per week
+MIN_TOTAL_INFANTS  <- 10     # distinct infants required for a continuous phenotype
+MAX_MAJORITY_SHARE <- 0.95   # largest level may hold at most this share of infants
+                             # (equivalent to the reference's minimum_variance = 5)
+MIN_SAMPLES_WEEK   <- 10     # minimum samples for a week to be analysed at all
+
+# Declared factor level that never occurs within a given week:
+#   "drop_level"  -> remove it, test the remaining levels that week
+#   "drop_factor" -> do not test the factor that week
+EMPTY_LEVEL_ACTION <- "drop_level"
+
+# Some infants contribute two samples in the same week, which PERMANOVA treats
+# as independent observations. Set TRUE to keep one sample per infant per week
+# (the earliest by Postnatal_Age) as a sensitivity analysis.
+ONE_SAMPLE_PER_INFANT_PER_WEEK <- FALSE
+
+# ── Distance construction ─────────────────────────────────────────────────────
+BUILD_DISTANCE   <- TRUE   # FALSE = use an existing my_distance_CLR unchanged
+PREV_ABUNDANCE   <- 0.05   # a taxon counts as present in an infant above this
+MIN_PREV_INFANTS <- 1      # taxon kept if present in at least this many infants
+
+INFANT_ID <- "MM_ID"   # counting unit for the screens
+SAMPLE_ID <- "ID"      # row key, matches the distance matrix
+
+print_all <- function(df) {
+  if (nrow(df) == 0) { cat("  (none)\n"); return(invisible(NULL)) }
+  print(as.data.frame(df), row.names = FALSE)
+  invisible(NULL)
+}
+
+# ── Phenotypes to test ────────────────────────────────────────────────────────
+PHENOS_TO_TEST <- c(
+  "prolonged_rupt", "mmpercentage", "surgery", "ab48", "apgar_1",
+  "apgar_5", "multiple", "delivery_md", "maternal_atb", "mother_st_com",
+  "pe_hellp", "maternal_infect", "mother_b_hem",
+  "antibiotic_sample", "ga_exact", "bw", "nec",
+  "sex", "admissiontime", "tpn_days", "sip", "sepsis_culture",
+  "pda_sign", "mortality", "pda", "SGA",
+  "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx",
+  "probiotics", "probiotic_sample",   # the export spells this "probiotic_sample"
+  # ── placental pathology: subtype factors + hypoplasia ─────────────────────
+  # placenta_ab and placental_weight are dropped, same as the binary version.
+  # dvi/chiv/mfi/mpvfd are omitted: all-zero in the current export.
+  "mvm", "fh", "hypoplasia", "fvm_type", "ch_type", "ca_type", "vue_type"
+)
+# "week" is deliberately absent: it is the stratifier, so it is constant within
+# each subset and cannot be tested there.
+
+PHENOTYPE_LABELS <- c(
+  # ── maternal / obstetric ──────────────────────────────────────────────────
+  "prolonged_rupt"    = "Prolonged Rupture of Membranes",
+  "multiple"          = "Multiple Pregnancy",
+  "delivery_md"       = "Delivery Mode",
+  "maternal_atb"      = "Maternal Antibiotics",
+  "maternal_ab48"     = "Maternal Antibiotics (48h)",
+  "mother_st"         = "Antenatal Corticosteroids (any)",
+  "mother_st_com"     = "Antenatal Corticosteroids (complete)",
+  "pe_hellp"          = "Pre-eclampsia / HELLP",
+  "maternal_infect"   = "Maternal Infection",
+  "mother_b_hem"      = "Maternal Group B Streptococcus",
+  "primiparous"       = "Primiparous",
+  "parities_nb"       = "Parity",
+
+  # ── infant characteristics ────────────────────────────────────────────────
+  "ga_exact"          = "Gestational Age",
+  "bw"                = "Birth Weight",
+  "sex"               = "Sex",
+  "apgar_1"           = "Apgar Score (1 min)",
+  "apgar_5"           = "Apgar Score (5 min)",
+  "SGA"               = "Small for Gestational Age",
+  "LGA"               = "Large for Gestational Age",
+  "FGR"               = "Fetal Growth Restriction",
+  "admissiontime"     = "Admission Duration",
+  "week"              = "Postnatal Week",
+  "Postnatal_Age"     = "Postnatal Age",
+
+  # ── treatment / exposure ──────────────────────────────────────────────────
+  "ab48"              = "Antibiotics in First 48h",
+  "abtx"              = "Antibiotic Treatment",
+  "antibiotic_sample" = "Days of Antibiotic Use",
+  "antibiotic"        = "Days of Antibiotic Use",
+  "probiotics"        = "Probiotics",
+  "probiotic_sample"  = "Days of Probiotic Use",
+  "probiotics_sample" = "Days of Probiotic Use",
+  "tpn_days"          = "Duration of Parenteral Nutrition",
+  "TFEF"              = "Time to Full Enteral Feeds",
+  "TFEF_B"            = "Time to Full Enteral Feeds (dichotomised)",
+  "mmpercentage"      = "Mother's Own Milk (%)",
+  "surgery"           = "Surgery",
+  "surgery_nec"       = "Surgery for NEC",
+  "rbc_tx_48"         = "Red Cell Transfusion (48h)",
+
+  # ── outcomes / morbidity ──────────────────────────────────────────────────
+  "nec"               = "Necrotizing Enterocolitis",
+  "nec_bell"          = "NEC (Bell Stage)",
+  "sip"               = "Spontaneous Intestinal Perforation",
+  "sepsis"            = "Sepsis",
+  "sepsis_culture"    = "Culture-proven Sepsis",
+  "sepsis_crp"        = "Sepsis (CRP-defined)",
+  "pda"               = "Patent Ductus Arteriosus",
+  "pda_sign"          = "Haemodynamically Significant PDA",
+  "ivh"               = "Intraventricular Haemorrhage",
+  "mortality"         = "Mortality",
+
+  # ── placental pathology ───────────────────────────────────────────────────
+  "mvm"               = "Maternal Vascular Malperfusion",
+  "fvm"               = "Fetal Vascular Malperfusion",
+  "fh"                = "Increased Nucleated Fetal Erythrocytes",
+  "hypoplasia"        = "Placental Hypoplasia (weight <p10)",
+  "placenta_ab"       = "Any Placental Abnormality",
+  "placental_weight"  = "Placental Weight",
+  "fvm_high_grade"    = "Fetal Vascular Malperfusion (High Grade)",
+  "vue_high_grade"    = "Villitis of Unknown Aetiology (High Grade)",
+  "fvm_type"          = "Fetal Vascular Malperfusion",
+  "ch_type"           = "Chorangiosis",
+  "ca_type"           = "Chorioamnionitis",
+  "vue_type"          = "Villitis of Unknown Aetiology"
+)
+
+LEVEL_LABELS <- c(
+  "low grade"                   = "Low Grade",
+  "high grade"                  = "High Grade",
+  "segmental"                   = "Segmental",
+  "diffuse"                     = "Diffuse",
+  "maternal response only"      = "Maternal Response Only",
+  "maternal and fetal response" = "Maternal and Fetal Response"
+)
+
+clean_phenotype_name <- function(name) {
+  vapply(name, function(nm) {
+    if (nm %in% names(PHENOTYPE_LABELS)) return(unname(PHENOTYPE_LABELS[nm]))
+    if (grepl("__", nm, fixed = TRUE)) {
+      parts <- strsplit(nm, "__", fixed = TRUE)[[1]]
+      base  <- parts[1]; lvl <- paste(parts[-1], collapse = "__")
+      base_lab <- if (base %in% names(PHENOTYPE_LABELS))
+        unname(PHENOTYPE_LABELS[base]) else tools::toTitleCase(gsub("_", " ", base))
+      lvl_lab  <- if (lvl %in% names(LEVEL_LABELS))
+        unname(LEVEL_LABELS[lvl]) else tools::toTitleCase(lvl)
+      return(sprintf("%s (%s)", base_lab, lvl_lab))
+    }
+    stripped <- gsub("_sample$", "", nm)
+    if (stripped %in% names(PHENOTYPE_LABELS))
+      return(unname(PHENOTYPE_LABELS[stripped]))
+    tools::toTitleCase(gsub("_", " ", nm))
+  }, FUN.VALUE = character(1), USE.NAMES = FALSE)
+}
+
+is_categorical_pheno <- function(x) {
+  if (is.factor(x) || is.character(x) || is.logical(x)) return(TRUE)
+  if (is.numeric(x)) return(length(unique(x[!is.na(x)])) <= 2)
+  TRUE
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 0 — read metadata, restrict to infant samples
+# ══════════════════════════════════════════════════════════════════════════════
+# write.table() output: whitespace separated, quoted, with a leading row-name
+# column that read.table() consumes automatically. quote = "\"" is required
+# because several placental levels contain spaces.
+metadata_all <- read.table(META_FILE, header = TRUE, quote = "\"",
+                           na.strings = c("NA", ""), stringsAsFactors = FALSE,
+                           comment.char = "")
+
+phenos <- metadata_all[metadata_all$SampleType == "infant", , drop = FALSE]
+rownames(phenos) <- phenos[[SAMPLE_ID]]
+
+cat(sprintf("Read %d rows; %d infant samples from %d infants\n",
+            nrow(metadata_all), nrow(phenos),
+            dplyr::n_distinct(phenos[[INFANT_ID]])))
+
+if (ONE_SAMPLE_PER_INFANT_PER_WEEK) {
+  before <- nrow(phenos)
+  phenos <- phenos %>%
+    arrange(.data[[INFANT_ID]], week, Postnatal_Age) %>%
+    group_by(.data[[INFANT_ID]], week) %>% dplyr::slice(1) %>% ungroup() %>%
+    as.data.frame()
+  rownames(phenos) <- phenos[[SAMPLE_ID]]
+  cat(sprintf("Deduplicated to one sample per infant per week: %d -> %d samples\n",
+              before, nrow(phenos)))
+}
+
+# ── Pin reference levels for the subtype factors ──────────────────────────────
+subtype_levels <- list(
+  fvm_type = c("none", "low grade", "high grade"),
+  ch_type  = c("none", "segmental", "diffuse"),
+  ca_type  = c("none", "maternal response only", "maternal and fetal response"),
+  vue_type = c("none", "low grade", "high grade")
+)
+for (v in names(subtype_levels)) {
+  if (!v %in% colnames(phenos)) { cat("!! missing column:", v, "\n"); next }
+  unmatched <- setdiff(unique(na.omit(as.character(phenos[[v]]))), subtype_levels[[v]])
+  if (length(unmatched) > 0)
+    warning(sprintf("%s: values not in the declared levels become NA -> %s",
+                    v, paste(unmatched, collapse = "; ")), call. = FALSE)
+  phenos[[v]] <- factor(phenos[[v]], levels = subtype_levels[[v]])
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — species filtering and Aitchison distance
+# ══════════════════════════════════════════════════════════════════════════════
+# Prevalence is counted per infant, not per sample: the infant identifier is
+# the sample-ID prefix (B001_18_4E08 -> B001), which is 1:1 with MM_ID.
+# vegdist(method = "aitchison") applies the CLR internally, so taxa_sp holds
+# relative abundances rather than CLR-transformed values.
+if (BUILD_DISTANCE) {
+
+  stopifnot(exists("taxa_sp"))
+
+  personal_ID <- sub("_.*", "", rownames(taxa_sp))
+
+  # Numeric columns only: > on a character column is a string comparison.
+  num_cols <- vapply(taxa_sp, is.numeric, logical(1))
+  unique_counts <- vapply(taxa_sp[, num_cols, drop = FALSE],
+                          function(x) length(unique(personal_ID[!is.na(x) & x > PREV_ABUNDANCE])),
+                          integer(1))
+
+  taxa_sp_filt <- taxa_sp[, names(unique_counts)[unique_counts >= MIN_PREV_INFANTS],
+                          drop = FALSE]
+
+  cat(sprintf("\nSpecies filter: %d of %d taxa present above %.3f in >= %d infant(s)\n",
+              ncol(taxa_sp_filt), sum(num_cols), PREV_ABUNDANCE, MIN_PREV_INFANTS))
+
+  # Align the taxa table to the phenotype table by row name.
+  common <- intersect(rownames(phenos), rownames(taxa_sp_filt))
+  cat(sprintf("Samples in both taxa table and metadata: %d (metadata %d, taxa %d)\n",
+              length(common), nrow(phenos), nrow(taxa_sp_filt)))
+  taxa_sp_filt <- taxa_sp_filt[common, , drop = FALSE]
+  phenos       <- phenos[common, , drop = FALSE]
+
+  my_pseudocount_normal <- min(taxa_sp_filt[taxa_sp_filt != 0]) / 2
+  cat(sprintf("Pseudocount (half the smallest non-zero abundance): %.3g\n",
+              my_pseudocount_normal))
+
+  my_distance_CLR <- vegdist(taxa_sp_filt, method = "aitchison",
+                             pseudocount = my_pseudocount_normal)
+}
+
+# ── Align distance matrix and phenotype table ─────────────────────────────────
+shared_ids <- intersect(rownames(phenos), rownames(as.matrix(my_distance_CLR)))
+cat(sprintf("Aligned: %d samples in phenotype table and distance matrix\n\n",
+            length(shared_ids)))
+phenos          <- phenos[shared_ids, , drop = FALSE]
+my_distance_CLR <- as.dist(as.matrix(my_distance_CLR)[shared_ids, shared_ids])
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DIAGNOSTIC — infants per week x phenotype x level
+# ══════════════════════════════════════════════════════════════════════════════
+build_level_counts <- function(phenotypes, phenos_to_test,
+                               week_col = "week", id_col = INFANT_ID) {
+  map_dfr(sort(unique(phenotypes[[week_col]])), function(tp) {
+    sub <- phenotypes[phenotypes[[week_col]] == tp & !is.na(phenotypes[[week_col]]),
+                      , drop = FALSE]
+    map_dfr(intersect(phenos_to_test, colnames(sub)), function(pheno) {
+      raw <- sub[[pheno]]; ok <- !is.na(raw); ids <- sub[[id_col]][ok]
+      if (!is_categorical_pheno(raw)) {
+        n_inf <- dplyr::n_distinct(ids)
+        return(tibble(Timepoint = as.character(tp), Phenotype = pheno,
+                      Type = "continuous", Level = NA_character_,
+                      n_samples = sum(ok), n_infants = n_inf,
+                      Share = NA_real_,
+                      Below_min = n_inf < MIN_TOTAL_INFANTS))
+      }
+      v  <- raw[ok]
+      lv <- if (is.factor(v)) levels(v) else sort(unique(as.character(v)))
+      tot <- dplyr::n_distinct(ids)
+      map_dfr(lv, function(l) {
+        sel   <- !is.na(as.character(v)) & as.character(v) == l
+        n_inf <- dplyr::n_distinct(ids[sel])
+        tibble(Timepoint = as.character(tp), Phenotype = pheno,
+               Type = "categorical", Level = as.character(l),
+               n_samples = sum(sel), n_infants = n_inf,
+               Share = if (tot > 0) round(n_inf / tot, 3) else NA_real_,
+               Below_min = n_inf < MIN_LEVEL_INFANTS)
+      })
+    })
+  }) %>% arrange(Phenotype, Timepoint, desc(n_infants))
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PERMANOVA — marginal (type III) SS, with both screening rules
+# ══════════════════════════════════════════════════════════════════════════════
+run_adonis <- function(phenotypes, phenos_to_test, distance_mat,
+                       perm = 10000, cores = 8,
+                       id_col             = INFANT_ID,
+                       min_level_n        = MIN_LEVEL_INFANTS,
+                       min_total_n        = MIN_TOTAL_INFANTS,
+                       max_majority       = MAX_MAJORITY_SHARE,
+                       empty_level_action = EMPTY_LEVEL_ACTION,
+                       timepoint_label    = NA_character_) {
+
+  dist_mat <- as.matrix(distance_mat)
+  skipped  <- list()
+  note <- function(pheno, rule, reason, detail = NA_character_) {
+    skipped[[length(skipped) + 1]] <<- tibble(
+      Timepoint = as.character(timepoint_label), Phenotype = pheno,
+      Rule = rule, Reason = reason, Detail = detail)
+    NULL
+  }
+
+  res <- map_dfr(phenos_to_test, function(pheno) {
+
+    if (!pheno %in% colnames(phenotypes)) return(note(pheno, "-", "not in table"))
+
+    covariates <- intersect(c("Clean_reads_P1", "DNA_conc"), colnames(phenotypes))
+
+    # Complete cases on the phenotype AND the covariates in the formula:
+    # adonis2 runs with na.action = na.fail, so an NA covariate would error.
+    keep <- !is.na(phenotypes[[pheno]])
+    for (cv in covariates) keep <- keep & !is.na(phenotypes[[cv]])
+
+    phenos_sub <- phenotypes[keep, , drop = FALSE]
+    ids        <- phenos_sub[[id_col]]
+    values     <- phenos_sub[[pheno]]
+    n_inf_tot  <- dplyr::n_distinct(ids)
+
+    if (n_inf_tot < min_total_n)
+      return(note(pheno, "group size", "too few infants",
+                  sprintf("%d infants (< %d)", n_inf_tot, min_total_n)))
+
+    if (is_categorical_pheno(phenotypes[[pheno]])) {
+
+      if (is.factor(values)) {
+        empty_levels <- setdiff(levels(values), unique(as.character(values)))
+        if (length(empty_levels) > 0) {
+          if (identical(empty_level_action, "drop_factor"))
+            return(note(pheno, "group size", "level absent in this week",
+                        paste(empty_levels, collapse = "; ")))
+          values <- droplevels(values)   # also prevents a rank-deficient design
+        }
+      } else {
+        values <- factor(values)
+      }
+
+      inf_per_level <- vapply(levels(values), function(l)
+        dplyr::n_distinct(ids[as.character(values) == l]), integer(1))
+      detail <- paste(sprintf("%s=%d infants", names(inf_per_level), inf_per_level),
+                      collapse = ", ")
+
+      if (length(inf_per_level) < 2)
+        return(note(pheno, "group size", "only one level present", detail))
+
+      # ---- RULE 1: >= min_level_n distinct infants in EVERY level ------------
+      if (any(inf_per_level < min_level_n))
+        return(note(pheno, "group size",
+                    sprintf("level with < %d infants", min_level_n), detail))
+
+      # ---- RULE 2: the largest level holds <= max_majority of infants --------
+      majority_share <- max(inf_per_level) / n_inf_tot
+      if (majority_share > max_majority)
+        return(note(pheno, "variance",
+                    sprintf("largest level %.1f%% of infants (> %.0f%%)",
+                            100 * majority_share, 100 * max_majority), detail))
+
+      phenos_sub[[pheno]] <- values
+      levels_tested <- paste(sprintf("%s=%d", names(inf_per_level), inf_per_level),
+                             collapse = "; ")
+      min_inf   <- as.integer(min(inf_per_level))
+      maj_share <- round(majority_share, 3)
+
+    } else {
+      if (length(unique(values)) < 2) return(note(pheno, "variance", "no variation"))
+      levels_tested <- "continuous"
+      min_inf       <- NA_integer_
+      maj_share     <- NA_real_
+    }
+
+    ids_sub  <- rownames(phenos_sub)
+    dist_sub <- dist_mat[ids_sub, ids_sub]
+
+    formula_str <- paste(
+      "dist_sub ~",
+      if (length(covariates) > 0) paste(c(covariates, pheno), collapse = " + ") else pheno
+    )
+
+    # by = "margin": each term is tested against the model containing all the
+    # others, i.e. marginal (type III) sums of squares.
+    ad <- tryCatch(
+      adonis2(formula(formula_str), data = phenos_sub,
+              permutations = perm, parallel = cores,
+              by = "margin", na.action = na.fail),
+      error = function(e) { note(pheno, "model", "adonis2 error", e$message); NULL }
+    )
+    if (is.null(ad)) return(NULL)
+
+    # Locate the term by row name, not by position.
+    pheno_row <- which(rownames(ad) == pheno)
+    resid_row <- which(rownames(ad) == "Residual")
+    if (length(pheno_row) == 0)
+      return(note(pheno, "model", "term not found in adonis2 output",
+                  paste(rownames(ad), collapse = "; ")))
+
+    tibble(
+      Phenotype      = pheno,
+      Df             = ad$Df[pheno_row],
+      F_stat         = ad[["F"]][pheno_row],
+      R2             = ad$R2[pheno_row],
+      p.value        = ad$`Pr(>F)`[pheno_row],
+      Residual_Df    = if (length(resid_row)) ad$Df[resid_row] else NA_integer_,
+      N_samples      = nrow(phenos_sub),
+      N_infants      = n_inf_tot,
+      Min_level_inf  = min_inf,
+      Majority_share = maj_share,
+      Levels_tested  = levels_tested
+    )
+  })
+
+  list(results = res,
+       skipped = if (length(skipped)) bind_rows(skipped) else tibble())
+}
+
+# ── STEP 2: group sizes per week, before anything is tested ───────────────────
+level_counts <- build_level_counts(phenos, PHENOS_TO_TEST)
+write.table(level_counts, "2A_level_counts_per_week.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+cat(sprintf("--- Categorical levels with < %d infants (will NOT be tested) ---\n",
+            MIN_LEVEL_INFANTS))
+level_counts %>%
+  filter(Type == "categorical", Below_min) %>%
+  arrange(Phenotype, Timepoint) %>%
+  print_all()
+cat("\n")
+
+# ── STEP 3: run PERMANOVA per timepoint ───────────────────────────────────────
+# Permutation p-values are random; the seed makes them reproducible. adonis2
+# draws the permutation matrix before parallelising, so this holds with
+# parallel = 8.
+set.seed(42)
+adonis_runs <- map(
+  sort(unique(phenos$week[!is.na(phenos$week)])),
+  function(tp) {
+    cat(sprintf("Analysing timepoint: %s\n", tp))
+    phenotypes <- phenos %>% filter(week == tp)
+    if (nrow(phenotypes) < MIN_SAMPLES_WEEK) {
+      cat(sprintf("  Skipping — only %d samples\n", nrow(phenotypes)))
+      return(NULL)
+    }
+    available <- PHENOS_TO_TEST[PHENOS_TO_TEST %in% colnames(phenotypes)]
+
+    out <- run_adonis(phenotypes = phenotypes, phenos_to_test = available,
+                      distance_mat = my_distance_CLR, perm = 10000, cores = 8,
+                      timepoint_label = tp)
+
+    if (nrow(out$results) > 0)
+      out$results <- mutate(out$results, Timepoint = as.character(tp))
+    cat(sprintf("  %d samples / %d infants — tested: %d   skipped: %d\n",
+                nrow(phenotypes), dplyr::n_distinct(phenotypes[[INFANT_ID]]),
+                nrow(out$results), nrow(out$skipped)))
+    out
+  }
+)
+
+ResultsAdonis <- map_dfr(compact(adonis_runs), "results")
+SkippedAdonis <- map_dfr(compact(adonis_runs), "skipped")
+
+write.table(ResultsAdonis, "2F_ResultsAdonis_subtypes.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+write.table(SkippedAdonis, "2A_ResultsAdonis_skipped.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+# ── Sanity check ──────────────────────────────────────────────────────────────
+cat(sprintf("\nTotal results:           %d rows\n", nrow(ResultsAdonis)))
+cat(sprintf("Rows with valid p.value: %d\n",       sum(!is.na(ResultsAdonis$p.value))))
+cat(sprintf("Rows passing p < 0.001:  %d\n",
+            sum(!is.na(ResultsAdonis$p.value) & ResultsAdonis$p.value < 0.001)))
+cat(sprintf("Phenotype x week combinations skipped: %d\n", nrow(SkippedAdonis)))
+
+if (nrow(SkippedAdonis) > 0) {
+  cat("\n--- Exclusions by rule ---\n")
+  SkippedAdonis %>% dplyr::count(Rule, Reason) %>% arrange(desc(n)) %>% print_all()
+
+  cat(sprintf("\n--- Excluded by RULE 1 (< %d infants in a level) ---\n", MIN_LEVEL_INFANTS))
+  SkippedAdonis %>% filter(Rule == "group size", grepl("^level with <", Reason)) %>%
+    arrange(Phenotype, Timepoint) %>% print_all()
+
+  cat(sprintf("\n--- Excluded by RULE 2 (largest level > %.0f%% of infants) ---\n",
+              100 * MAX_MAJORITY_SHARE))
+  SkippedAdonis %>% filter(Rule == "variance") %>%
+    arrange(Phenotype, Timepoint) %>% print_all()
+}
+
+stopifnot(all(is.na(ResultsAdonis$Min_level_inf) |
+              ResultsAdonis$Min_level_inf >= MIN_LEVEL_INFANTS))
+stopifnot(all(is.na(ResultsAdonis$Majority_share) |
+              ResultsAdonis$Majority_share <= MAX_MAJORITY_SHARE))
+cat(sprintf("\n✓ Every reported categorical term has >= %d infants per level and a largest level <= %.0f%%\n\n",
+            MIN_LEVEL_INFANTS, 100 * MAX_MAJORITY_SHARE))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FIGURE 1B — DOT PLOT
+# ══════════════════════════════════════════════════════════════════════════════
+ResultsAdonis <- read.delim("2F_ResultsAdonis_subtypes.txt") %>%
+  mutate(across(c(Df, F_stat, R2, p.value), as.numeric)) %>%
+  group_by(Timepoint) %>%
+  mutate(FDR = p.adjust(p.value, method = "BH")) %>%
+  ungroup()
+
+significant2 <- ResultsAdonis %>%
+  filter(p.value < 0.001, Df < 3, Timepoint != "Overall") %>%
+  mutate(
+    R2                 = round(R2, 3),
+    Phenotype_readable = clean_phenotype_name(Phenotype)
+  )
+
+if (nrow(significant2) == 0) {
+  stop("No significant results after filtering (p < 0.001, Df < 3). ",
+       "Check the sanity check output above.")
+}
+
+unlabelled <- setdiff(unique(significant2$Phenotype), names(PHENOTYPE_LABELS))
+unlabelled <- unlabelled[!grepl("__", unlabelled, fixed = TRUE)]
+if (length(unlabelled) > 0)
+  warning("No label defined for: ", paste(unlabelled, collapse = ", "),
+          " — add them to PHENOTYPE_LABELS.", call. = FALSE)
+
+cat("\n--- Row labels on the figure ---\n")
+significant2 %>% dplyr::distinct(Phenotype, Phenotype_readable) %>%
+  arrange(Phenotype) %>% print_all()
+
+timepoint_order  <- as.character(1:8)
+timepoint_labels <- setNames(paste("W", 1:8), timepoint_order)
+phenotype_levels <- sort(unique(significant2$Phenotype_readable))
+
+significant2 <- significant2 %>%
+  mutate(
+    Timepoint          = factor(as.character(Timepoint),
+                                levels = timepoint_order, ordered = TRUE),
+    Phenotype_readable = factor(Phenotype_readable, levels = phenotype_levels)
+  )
+
+segments <- significant2 %>%
+  group_by(Phenotype_readable) %>%
+  summarise(
+    first_tp = factor(min(as.integer(Timepoint)), levels = timepoint_order, ordered = TRUE),
+    last_tp  = factor(max(as.integer(Timepoint)), levels = timepoint_order, ordered = TRUE),
+    .groups  = "drop"
+  ) %>%
+  mutate(Phenotype_readable = factor(Phenotype_readable, levels = phenotype_levels))
+
+adonis_plot <- ggplot(significant2, aes(y = Phenotype_readable)) +
+  geom_segment(data = segments,
+               aes(x = first_tp, xend = last_tp, yend = Phenotype_readable),
+               colour = "grey60", linewidth = 0.3, inherit.aes = TRUE) +
+  geom_point(aes(x = Timepoint, size = R2, fill = Timepoint),
+             shape = 21, colour = "black") +
+  scale_y_discrete(limits = rev(phenotype_levels)) +
+  scale_x_discrete(limits = timepoint_order, labels = timepoint_labels) +
+  scale_size_continuous(name = "R²", range = c(1, 8),
+                        limits = c(0, 0.2), breaks = seq(0, 0.2, 0.05)) +
+  scale_fill_brewer(palette = "Set2", labels = timepoint_labels, name = "Timepoint") +
+  xlab("Timepoint") + ylab("") +
+  theme_bw() +
+  theme(axis.text.y        = element_text(size = 12, face = "bold"),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_blank(),
+        plot.title         = element_text(hjust = 0.5, size = 14))
+
+print(adonis_plot)
+ggsave("1B_permanova_results_subtypes.pdf", adonis_plot, width = 7, height = 5, dpi = 300)
+cat("✓ Saved: 1B_permanova_results_subtypes.pdf\n")
+
+# ── LEGEND NUMBERS: Fig. 1b ───────────────────────────────────────────────────
+# Dots are selected on nominal p < 0.001 and Df < 3; the FDR column is BH
+# within each week.
+legend_out("Fig 1b — samples / infants analysed per week",
+           phenos %>% filter(!is.na(week)) %>% n_si(week))
+legend_out("Fig 1b — tests per week (BH family size, within week)",
+           ResultsAdonis %>% dplyr::count(Timepoint, name = "n_tests"))
+legend_out("Fig 1b — plotted dots (p < 0.001, Df < 3)",
+           significant2 %>%
+             transmute(Timepoint, Phenotype = Phenotype_readable, Df, R2,
+                       p.value = signif(p.value, 3), FDR = signif(FDR, 3),
+                       N_samples, N_infants, Levels_tested) %>%
+             arrange(Phenotype, Timepoint))
+legend_out("Fig 1b — selection rule check",
+           sprintf("plotted dots: %d | with FDR < 0.05: %d | min/max p: %.2g / %.2g | max FDR: %.2g",
+                   nrow(significant2), sum(significant2$FDR < 0.05),
+                   min(significant2$p.value), max(significant2$p.value),
+                   max(significant2$FDR)))
+legend_out("Fig 1b — dots that WOULD be plotted under FDR < 0.05 (Df < 3) but are not",
+           ResultsAdonis %>% filter(FDR < 0.05, Df < 3, p.value >= 0.001) %>%
+             transmute(Timepoint, Phenotype, p.value = signif(p.value, 3),
+                       FDR = signif(FDR, 3), N_samples, N_infants))
+legend_out("Fig 1b — PERMANOVA settings",
+           sprintf("adonis2, marginal SS (by = 'margin'), covariates: %s, permutations: 10000; screens: >= %d infants per level, largest level <= %.0f%%, >= %d infants for continuous, >= %d samples per week",
+                   paste(intersect(c("Clean_reads_P1", "DNA_conc"), colnames(phenos)), collapse = " + "),
+                   MIN_LEVEL_INFANTS, 100 * MAX_MAJORITY_SHARE, MIN_TOTAL_INFANTS, MIN_SAMPLES_WEEK))
+
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# SUPPLEMENT — joint PERMANOVA of correlated predictors, per week
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Settings ──────────────────────────────────────────────────────────────────
+JOINT_PREDICTORS <- c("probiotics", "ga_exact", "bw", "antibiotic_sample",
+                      "delivery_md")
+# Column that marks the sub-cohort (e.g. "subcohort", "study", "site").
+# Leave NULL if there is none; set it to add sub-cohort as a predictor.
+SUBCOHORT_VAR    <- NULL
+TECH_COVARIATES  <- c("Clean_reads_P1", "DNA_conc")
+JOINT_PERM       <- 10000
+# Also run with one sample per infant per week (earliest), as a sensitivity
+# analysis for infants sampled twice in the same week.
+RUN_DEDUP        <- TRUE
+
+stopifnot(exists("phenos"), exists("my_distance_CLR"))
+predictors_all <- c(JOINT_PREDICTORS, SUBCOHORT_VAR)
+missing_cols   <- setdiff(c(predictors_all, TECH_COVARIATES), colnames(phenos))
+if (length(missing_cols)) stop("Not in phenos: ", paste(missing_cols, collapse = ", "))
+
+dist_all <- as.matrix(my_distance_CLR)
+
+# Binary / character predictors as factors, continuous left numeric
+prep_predictors <- function(df) {
+  for (v in predictors_all)
+    if (is_categorical_pheno(df[[v]])) df[[v]] <- factor(df[[v]])
+  df
+}
+
+# ── One joint model per week ──────────────────────────────────────────────────
+run_joint_week <- function(df, tp) {
+  df   <- prep_predictors(df)
+  keep <- stats::complete.cases(df[, c(TECH_COVARIATES, predictors_all), drop = FALSE])
+  df   <- df[keep, , drop = FALSE]
+  if (nrow(df) < MIN_SAMPLES_WEEK) return(NULL)
+
+  # Same screens as Fig. 1b, applied within this week's complete cases; a
+  # predictor that fails is dropped from this week's model (and reported).
+  used <- character(0); dropped <- character(0)
+  for (v in predictors_all) {
+    x <- df[[v]]; ids <- df[[INFANT_ID]]
+    ok <- if (is.factor(x)) {
+      x <- droplevels(x); df[[v]] <- x
+      inf <- vapply(levels(x), function(l) dplyr::n_distinct(ids[x == l]), integer(1))
+      length(inf) >= 2 && all(inf >= MIN_LEVEL_INFANTS) &&
+        max(inf) / dplyr::n_distinct(ids) <= MAX_MAJORITY_SHARE
+    } else {
+      length(unique(x)) > 1 && dplyr::n_distinct(ids) >= MIN_TOTAL_INFANTS
+    }
+    if (ok) used <- c(used, v) else dropped <- c(dropped, v)
+  }
+  if (!length(used)) return(NULL)
+
+  ids_s <- rownames(df)
+  f <- stats::as.formula(paste("d ~", paste(c(TECH_COVARIATES, used), collapse = " + ")))
+  d <- stats::as.dist(dist_all[ids_s, ids_s])
+  set.seed(42)
+  ad <- adonis2(f, data = df, permutations = JOINT_PERM, by = "margin",
+                parallel = 8)
+  tibble(Timepoint = as.character(tp), Term = rownames(ad),
+         Df = ad$Df, R2 = ad$R2, F_stat = ad[["F"]], p.value = ad$`Pr(>F)`,
+         N_samples = nrow(df), N_infants = dplyr::n_distinct(df[[INFANT_ID]]),
+         Dropped_this_week = paste(dropped, collapse = "; ")) %>%
+    filter(Term %in% used)
+}
+
+run_joint_all <- function(ph) {
+  map_dfr(sort(unique(ph$week[!is.na(ph$week)])), function(tp)
+    run_joint_week(ph[ph$week == tp & !is.na(ph$week), , drop = FALSE], tp))
+}
+
+joint_res <- run_joint_all(phenos) %>%
+  group_by(Timepoint) %>% mutate(FDR = p.adjust(p.value, "BH")) %>% ungroup() %>%
+  mutate(Analysis = "joint, all samples")
+
+if (RUN_DEDUP) {
+  phenos_dedup <- phenos %>% tibble::rownames_to_column(".rid") %>%
+    arrange(.data[[INFANT_ID]], week, Postnatal_Age) %>%
+    group_by(.data[[INFANT_ID]], week) %>% dplyr::slice(1) %>% ungroup() %>%
+    as.data.frame()
+  rownames(phenos_dedup) <- phenos_dedup$.rid
+  joint_dedup <- run_joint_all(phenos_dedup) %>%
+    group_by(Timepoint) %>% mutate(FDR = p.adjust(p.value, "BH")) %>% ungroup() %>%
+    mutate(Analysis = "joint, one sample per infant per week")
+  joint_res <- bind_rows(joint_res, joint_dedup)
+}
+
+# ── Side by side with the single-predictor results of Fig. 1b ─────────────────
+single_res <- ResultsAdonis %>%
+  filter(Phenotype %in% predictors_all) %>%
+  transmute(Timepoint = as.character(Timepoint), Term = Phenotype,
+            R2_single = R2, p_single = p.value)
+
+joint_table <- joint_res %>%
+  left_join(single_res, by = c("Timepoint", "Term")) %>%
+  mutate(Term = clean_phenotype_name(Term),
+         across(c(R2, R2_single), ~ round(.x, 4)),
+         across(c(p.value, FDR, p_single), ~ signif(.x, 3)),
+         F_stat = round(F_stat, 2)) %>%
+  arrange(Analysis, as.numeric(Timepoint), Term)
+
+write.table(joint_table, "1B_joint_PERMANOVA.txt", sep = "\t",
+            row.names = FALSE, quote = FALSE)
+legend_out("Supp — joint PERMANOVA per week (marginal SS; + reads + DNA conc)",
+           joint_table)
+
+# ── How correlated are the predictors? (one row per infant) ───────────────────
+# Infant-level characteristics; antibiotic_sample varies by sample, so its
+# infant mean is used here.
+infant_tab <- prep_predictors(phenos) %>%
+  group_by(.data[[INFANT_ID]]) %>%
+  summarise(across(all_of(predictors_all),
+                   ~ if (is.factor(.x)) suppressWarnings(as.numeric(as.character(dplyr::first(.x))))
+                     else mean(.x, na.rm = TRUE)), .groups = "drop")
+# Keep predictors that are numeric or binary 0/1; a sub-cohort with named levels
+# (more than two) cannot enter a rank correlation and is left out here.
+num_ok   <- vapply(infant_tab[, predictors_all], function(x) sum(!is.na(x)) > 2, logical(1))
+cor_mat  <- stats::cor(infant_tab[, predictors_all[num_ok]], method = "spearman",
+                       use = "pairwise.complete.obs")
+cor_long <- as.data.frame(as.table(cor_mat)) %>%
+  dplyr::rename(V1 = Var1, V2 = Var2, rho = Freq) %>%
+  filter(as.character(V1) < as.character(V2)) %>%
+  mutate(rho = round(rho, 2)) %>% arrange(desc(abs(rho)))
+write.table(cor_long, "1B_predictor_correlations.txt", sep = "\t",
+            row.names = FALSE, quote = FALSE)
+legend_out(sprintf("Supp — Spearman correlations between predictors (one row per infant, n = %d)",
+                   nrow(infant_tab)), cor_long)
+
+# Variance inflation within the joint model (pooled samples)
+if (requireNamespace("car", quietly = TRUE)) {
+  vif_df <- prep_predictors(phenos)
+  vif_df <- vif_df[stats::complete.cases(vif_df[, c(TECH_COVARIATES, predictors_all)]), ]
+  set.seed(1); vif_df$.y <- stats::rnorm(nrow(vif_df))
+  v <- car::vif(stats::lm(stats::as.formula(paste(".y ~",
+         paste(c(TECH_COVARIATES, predictors_all), collapse = " + "))), data = vif_df))
+  v <- if (is.matrix(v)) v[, ncol(v)]^2 else v
+  legend_out("Supp — VIF of the joint model terms (pooled samples; >5 = concerning)",
+             data.frame(Term = names(v), VIF = round(as.numeric(v), 2)))
+}
+
+# Heatmap of the correlations, for the supplement
+pheatmap::pheatmap(cor_mat, display_numbers = TRUE, number_format = "%.2f",
+                   breaks = seq(-1, 1, length.out = 51),
+                   color = colorRampPalette(c("#2166ac", "white", "#b2182b"))(50),
+                   labels_row = clean_phenotype_name(rownames(cor_mat)),
+                   labels_col = clean_phenotype_name(colnames(cor_mat)),
+                   cluster_rows = FALSE, cluster_cols = FALSE,
+                   filename = "1B_predictor_correlations.pdf", width = 5, height = 4.5)
+cat("✓ Saved: 1B_joint_PERMANOVA.txt, 1B_predictor_correlations.txt/.pdf\n")
+```
+
+
+```{r}
+# One definition, used by both figures, so they can never drift apart.
+PROBIOTIC_COLS <- c("No" = "#4a3aa7", "Yes" = "#1baf7a")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Figure 1C — PCoA coloured by probiotic exposure
+# ══════════════════════════════════════════════════════════════════════════════
+phenos_imputed_div_pc_CLR$probiotics <- factor(phenos_imputed_div_pc_CLR$probiotics,
+                                               levels = c(0, 1),
+                                               labels = c("No", "Yes"))
+phenos_imputed_div_pc_CLR$week <- factor(phenos_imputed_div_pc_CLR$week,
+                                         levels = c("1","2","3","4","5","6","7","8"),
+                                         labels = c("W1","W2","W3","W4","W5","W6","W7","W8"))
+
+overall <- ggplot(phenos_imputed_div_pc_CLR,
+                  aes(PC1, PC2, fill = probiotics, colour = probiotics)) +
+
+  geom_point(shape = 21, size = 2.4, stroke = 0.3, alpha = 0.85) +
+  stat_ellipse(aes(group = probiotics), type = "norm", linetype = 2,
+               geom = "path", linewidth = 0.7, show.legend = FALSE) +
+  xlab(paste("PCo1=", round(my_var_CLR[1], digits = 2), "%", sep = "")) +
+  ylab(paste("PCo2=", round(my_var_CLR[2], digits = 2), "%", sep = "")) +
+  
+  scale_fill_manual(name = "Probiotics", values = PROBIOTIC_COLS) +
+  scale_colour_manual(name = "Probiotics", values = PROBIOTIC_COLS) +
+  guides(
+    fill   = guide_legend(override.aes = list(size = 4.5, stroke = 0.3, alpha = 1)),
+    colour = guide_legend(override.aes = list(size = 4.5, stroke = 0.3, alpha = 1))
+  ) +
+  theme(plot.subtitle      = element_text(vjust = 1),
+        plot.caption       = element_text(vjust = 1),
+        axis.title.x       = element_text(size = 18),
+        axis.title.y       = element_text(size = 18),
+        axis.line.x        = element_line(),
+        axis.line.y        = element_line(),
+        legend.position    = 'bottom',
+        legend.title       = element_text(size = 18),
+        legend.text        = element_text(size = 18),
+        legend.key         = element_blank(),
+        panel.grid.major   = element_line(colour = NA),
+        panel.grid.minor   = element_line(colour = NA),
+        panel.background   = element_rect(fill = NA))
+
+overall <- ggExtra::ggMarginal(
+  overall, type = "histogram", groupColour = FALSE, groupFill = TRUE,
+  xparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white'),
+  yparams = list(bins = 60, alpha = 0.8, position = 'identity', color = 'white')
+)
+overall
+
+ggsave(filename = "1C_probiotics_PCoA_plot.pdf", plot = overall,
+       width = 6, height = 5, dpi = 300)
+
+# ── LEGEND NUMBERS: Fig. 1c ───────────────────────────────────────────────────
+# PERMANOVA on the same distance as the PCoA, with the same covariates as
+# Fig. 1b. Samples are pooled across weeks and infants, so repeated samples per
+# infant are treated as independent; the per-week PERMANOVA results for
+# probiotics (Fig. 1b) are printed alongside for that
+# reason.
+pc_df  <- phenos_imputed_div_pc_CLR %>% as.data.frame()
+d_all  <- as.matrix(vegdist(taxa_sp_filt_CLR[, , drop = FALSE], method = "euclidean"))
+# Euclidean distance on CLR values = Aitchison distance (same pseudocount)
+ids_1c <- intersect(rownames(pc_df), rownames(d_all))
+dat_1c <- pc_df[ids_1c, , drop = FALSE] %>%
+  filter(!is.na(probiotics), !is.na(Clean_reads_P1), !is.na(DNA_conc))
+set.seed(42)
+ad_1c <- adonis2(as.dist(d_all[rownames(dat_1c), rownames(dat_1c)]) ~
+                   Clean_reads_P1 + DNA_conc + probiotics,
+                 data = dat_1c, permutations = 10000, by = "margin")
+legend_out("Fig 1c — plotted points (samples; infants) by probiotic status",
+           pc_df %>% n_si(probiotics))
+legend_out("Fig 1c — infants contributing to both groups",
+           as.character(length(intersect(pc_df$MM_ID[pc_df$probiotics == "Yes"],
+                                         pc_df$MM_ID[pc_df$probiotics == "No"]))))
+legend_out("Fig 1c — pooled PERMANOVA, probiotics (marginal SS, + reads + DNA conc)",
+           sprintf("n = %d samples / %d infants | R2 = %.3f | F = %.2f | p = %.2g",
+                   nrow(dat_1c), dplyr::n_distinct(dat_1c$MM_ID),
+                   ad_1c["probiotics", "R2"], ad_1c["probiotics", "F"],
+                   ad_1c["probiotics", "Pr(>F)"]))
+legend_out("Fig 1c — per-week PERMANOVA for probiotics (from Fig 1b)",
+           ResultsAdonis %>% filter(Phenotype == "probiotics") %>%
+             transmute(Timepoint, R2 = round(R2, 3), p.value = signif(p.value, 3),
+                       FDR = signif(FDR, 3), N_samples, N_infants))
+legend_out("Fig 1c — PCoA variance explained (%)",
+           sprintf("PCo1 %.2f | PCo2 %.2f", my_var_CLR[1], my_var_CLR[2]))
+```
+```{r}
+library(tidyverse); library(ape); library(ggtree)
+
+# ── Metadata ──────────────────────────────────────────────
+meta <- read.delim("metadata_cleaned_april.txt") %>%
+  mutate(
+    label      = as.character(ID),
+    SampleType = trimws(as.character(SampleType)),
+    SampleType = factor(SampleType,
+                        levels = c("maternal", "infant", "probiotic",
+                                   "negative", "positive")),
+    probiotics = factor(as.character(probiotics), levels = c(0, 1))
+  )
+
+# ── Tree + tip cleaning (unchanged) ───────────────────────
+tree <- read.tree("RAxML_bestTree.t__SGB17248.StrainPhlAn4.tre")
+tree$tip.label <- sub("^(([^_]*_){3}).*$", "\\1", tree$tip.label)
+tree$tip.label <- sub("_$", "", tree$tip.label)
+tree$tip.label <- sub("MG10BOMPC1_ZKDN250026178-1A_2323WCLT3", "P300_00_13H1", tree$tip.label)
+tree$tip.label <- sub("MG10BOMPC2_ZKDN250026179-1A_2323WCLT3", "P300_00_13H2", tree$tip.label)
+n_tips_raw     <- length(tree$tip.label)
+tips_no_meta   <- tree$tip.label[!tree$tip.label %in% meta$label]
+tree <- drop.tip(tree, tree$tip.label[!tree$tip.label %in% meta$label])
+
+# ── Tip data + four-level exposure variable ───────────────
+tip_data <- tibble(label = tree$tip.label) %>%
+  left_join(meta, by = "label") %>%
+  mutate(
+    exposure = case_when(
+      SampleType == "maternal"                            ~ "maternal",
+      SampleType %in% c("probiotic", "negative", "positive") ~ "control",
+      SampleType == "infant" & probiotics == "1"          ~ "infant_exposed",
+      SampleType == "infant" & probiotics == "0"          ~ "infant_unexposed",
+      TRUE                                                ~ "control"
+    ),
+    exposure = factor(exposure,
+      levels = c("infant_exposed", "infant_unexposed", "maternal", "control"))
+  )
+
+print(table(tip_data$exposure, useNA = "always"))
+
+# ── Aesthetics ────────────────────────────────────────────
+exposure_colors <- c(
+  infant_exposed   = "#199e70",   # teal   — matches figure 1C "Yes"
+  infant_unexposed = "#4a3aa7",   # violet — matches figure 1C "No"
+  maternal         = "#d95926",   # orange — replaces #009E73, which was
+                                  #          indistinguishable from the teal
+  control          = "#1a1a1a"    # near-black — reference category
+)
+
+# Circles for the two infant groups so they differ ONLY in colour; a distinct
+# outline for the two non-infant categories.
+exposure_shapes <- c(
+  infant_exposed   = 21,   # circle
+  infant_unexposed = 21,   # circle
+  maternal         = 24,   # triangle
+  control          = 22    # square
+)
+
+exposure_labels <- c(
+  infant_exposed   = "Probiotic-exposed",
+  infant_unexposed = "Non-exposed",
+  maternal         = "Maternal",
+  control          = "Probiotic Control"
+)
+
+# ── Plot: circular fan ────────────────────────────────────
+p_pub <- ggtree(tree, layout = "fan", open.angle = 20,
+                color = "grey55", linewidth = 0.3) %<+% tip_data +
+  geom_tippoint(
+    aes(fill = exposure, shape = exposure),
+    size = 5, colour = "grey15", stroke = 0.3
+  ) +
+  # Identical name and labels on both scales, so ggplot merges fill and shape
+  # into a single legend rather than drawing two.
+  scale_fill_manual(
+    values = exposure_colors, name = NULL, labels = exposure_labels,
+    na.value = "grey80",
+    guide = guide_legend(override.aes = list(size = 3.6))
+  ) +
+  scale_shape_manual(
+    values = exposure_shapes, name = NULL, labels = exposure_labels,
+    na.value = 21,
+    guide = guide_legend(override.aes = list(size = 3.6))
+  ) +
+  ggtree::hexpand(-0.1) +
+  theme_void(base_family = "sans") +
+  theme(
+    legend.position  = "right",
+    legend.text      = element_text(size = 18),
+    legend.key       = element_blank(),
+    legend.spacing.y = unit(0.2, "cm"),
+    plot.background  = element_rect(fill = "white", colour = NA),
+    plot.margin      = margin(6, 6, 6, 6)
+  )
+
+p_pub
+
+ggsave("1D_Longum_tree_publication.pdf", p_pub, width = 7, height = 4.5, device = pdf)
+
+# ── LEGEND NUMBERS: Fig. 1d ───────────────────────────────────────────────────
+legend_out("Fig 1d — tips in StrainPhlAn tree (SGB17248)",
+           sprintf("in tree file: %d | dropped (no metadata match): %d | plotted: %d",
+                   n_tips_raw, length(tips_no_meta), length(tree$tip.label)))
+if (length(tips_no_meta))
+  legend_out("Fig 1d — dropped tip labels", tips_no_meta)
+legend_out("Fig 1d — plotted tips by category (samples; distinct MM_ID = mother-infant pair / infant)",
+           tip_data %>% n_si(exposure))
+legend_out("Fig 1d — control tips by SampleType",
+           tip_data %>% filter(exposure == "control") %>% dplyr::count(SampleType))
+```
+
+```{r}
+#Figure 1E — Probiotic exposure vs key bile acid CLR coordinates
+
+library(tidyverse)
+library(readxl)
+library(lme4)
+library(lmerTest)
+library(zCompositions)
+
+DATA_DIR <- "."
+p <- function(f) file.path(DATA_DIR, f)
+
+set.seed(42)   # (2) geom_jitter is random — fix it
+
+## -----------------------------------------------------------------------------
+## 1. Load & assemble data        (1) all objects suffixed _ba
+## -----------------------------------------------------------------------------
+PBC_248_resultaten <- read_excel(p("PBC_248_resultaten.xlsx"))
+bili_ba            <- read_excel(p("bili.xlsx"))
+
+id_ba <- PBC_248_resultaten %>%
+  select(Nr, ID, postnatal_day) %>%
+  mutate(Nr = gsub(" ", "-", Nr), MM_ID = ID, ID = Nr) %>%
+  select(-Nr)
+
+merged_ba <- id_ba %>% left_join(bili_ba, by = "ID") %>% select(-ID)
+
+metadata_ba <- read.delim(p("metadata_cleaned_april.txt"))
+row.names(metadata_ba) <- metadata_ba$ID
+metadata_infant_ba <- metadata_ba[grep("^B", rownames(metadata_ba)), ]
+
+bili_total_ba <- metadata_infant_ba %>%
+  left_join(merged_ba, by = c("MM_ID" = "MM_ID",
+                              "Postnatal_Age" = "postnatal_day"))
+
+## -----------------------------------------------------------------------------
+## 2. Bile acid species & conjugation classes
+## -----------------------------------------------------------------------------
+ba_cols <- c("GLCA-3S","TLCA-3S","LCA","UDCA","HDCA","CDCA","DCA","CA","HCA",
+             "GLCA","GUDCA","GHDCA","GCDCA","GDCA","LCA-3S","GCA","TLCA",
+             "TUDCA","THDCA","TCDCA","TDCA","TCA")
+
+conjugated   <- c("GLCA-3S","TLCA-3S","GLCA","GUDCA","GHDCA","GCDCA","GDCA",
+                  "GCA","LCA-3S","TLCA","TUDCA","THDCA","TCDCA","TDCA","TCA")
+unconjugated <- c("LCA","UDCA","HDCA","CDCA","DCA","CA","HCA")
+
+stopifnot(length(setdiff(ba_cols, colnames(bili_total_ba))) == 0)
+
+## -----------------------------------------------------------------------------
+## 3. Zero replacement and CLR transform        (8)
+## -----------------------------------------------------------------------------
+clr_rows <- function(mat) {
+  L <- log(as.matrix(mat))
+  sweep(L, 1, rowMeans(L), "-")          # each row minus its own geometric mean
+}
+
+ba_raw <- bili_total_ba %>%
+  select(ID, all_of(ba_cols)) %>%
+  column_to_rownames("ID")
+ba_raw[is.na(ba_raw)] <- 0
+ba_raw <- ba_raw[rowSums(ba_raw) > 0, colSums(ba_raw) > 0, drop = FALSE]
+
+cat("\n--- zero structure ---\n")
+cat("samples: ", nrow(ba_raw), " | species: ", ncol(ba_raw),
+    " | zeros: ", round(mean(as.matrix(ba_raw) == 0) * 100, 1), "%\n", sep = "")
+
+## (8a) Primary: Bayesian-multiplicative replacement (count zero multiplicative).
+## z.warning is raised because several bile acids are legitimately absent from
+## most samples; z.delete = FALSE keeps those columns rather than dropping them.
+ba_repl <- tryCatch(
+  as.matrix(cmultRepl(ba_raw, label = 0, method = "CZM",
+                      z.warning = 1, z.delete = FALSE, suppress.print = TRUE)),
+  error = function(e) { message("cmultRepl failed: ", conditionMessage(e)); NULL })
+
+## (8b) Simple multiplicative replacement, for comparison.
+mult_repl <- function(mat) {
+  t(apply(mat, 1, function(x) {
+    pos <- x[x > 0]
+    if (length(pos) == 0) return(x)
+    x[x == 0] <- min(pos) / 2
+    x / sum(x)
+  }))
+}
+ba_repl_simple <- mult_repl(ba_raw)
+rownames(ba_repl_simple) <- rownames(ba_raw)
+
+if (is.null(ba_repl)) {
+  message("Falling back to the simple min(positive)/2 replacement.")
+  ba_repl <- ba_repl_simple
+} else {
+  rownames(ba_repl) <- rownames(ba_raw)
+  ## How much does the choice of imputation matter? Report it rather than assume.
+  agree <- diag(cor(clr_rows(ba_repl), clr_rows(ba_repl_simple),
+                    use = "pairwise.complete.obs"))
+  cat("\n--- CLR agreement between cmultRepl (CZM) and min/2 replacement ---\n")
+  cat("  per-coordinate Pearson r: min ", round(min(agree), 3),
+      " | median ", round(median(agree), 3),
+      " | max ", round(max(agree), 3), "\n", sep = "")
+}
+
+ba_clr <- clr_rows(ba_repl)
+rownames(ba_clr) <- rownames(ba_raw)
+
+conj_set   <- intersect(conjugated,   colnames(ba_repl))
+unconj_set <- intersect(unconjugated, colnames(ba_repl))
+conj_unconj_lr <- log(rowSums(ba_repl[, conj_set,   drop = FALSE]) /
+                      rowSums(ba_repl[, unconj_set, drop = FALSE]))
+
+bili_clr_mat <- as.data.frame(ba_clr)
+bili_clr_mat$conj_unconj_lr <- conj_unconj_lr[rownames(bili_clr_mat)]
+
+## -----------------------------------------------------------------------------
+## 4. Distribution check on the CLR coordinates
+## -----------------------------------------------------------------------------
+skewness <- function(x) {
+  x <- x[!is.na(x)]; n <- length(x); if (n < 3) return(NA_real_)
+  m <- mean(x); sqrt(n) * sum((x - m)^3) / (sum((x - m)^2)^1.5)
+}
+safe_shapiro <- function(x) {
+  x <- x[!is.na(x)]
+  if (length(unique(x)) < 3 || length(x) < 3 || length(x) > 5000) return(NA_real_)
+  tryCatch(shapiro.test(x)$p.value, error = function(e) NA_real_)
+}
+
+clr_long <- bili_clr_mat %>%
+  rownames_to_column("ID") %>%
+  pivot_longer(-ID, names_to = "bile_acid", values_to = "value") %>%
+  filter(!is.na(value))
+
+clr_dist <- clr_long %>%
+  group_by(bile_acid) %>%
+  summarise(skew = skewness(value),
+            shapiro_p = safe_shapiro(value), .groups = "drop") %>%
+  arrange(desc(abs(skew)))
+print(as.data.frame(clr_dist))
+
+ggplot(clr_long, aes(sample = value)) +
+  stat_qq(size = 0.7, alpha = 0.5, colour = "#2c7fb8") +
+  stat_qq_line(colour = "grey30", linewidth = 0.4) +
+  facet_wrap(~ bile_acid, scales = "free") +
+  labs(x = "Theoretical quantiles", y = "Sample quantiles",
+       title = "CLR-transformed bile acids - normal QQ") +
+  theme_classic(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        strip.background = element_blank(),
+        strip.text = element_text(face = "bold", size = 9))
+
+## -----------------------------------------------------------------------------
+## 5. Mixed-model machinery (random intercept per infant: MM_ID)
+## -----------------------------------------------------------------------------
+fit_lmer_flagged <- function(formula, data) {
+  rank_def <- FALSE; singular <- FALSE
+  fit <- tryCatch(
+    withCallingHandlers(
+      lmer(formula, data, REML = FALSE),
+      warning = function(w) {
+        msg <- conditionMessage(w)
+        if (grepl("rank deficient", msg, ignore.case = TRUE)) rank_def <<- TRUE
+        if (grepl("singular",       msg, ignore.case = TRUE)) singular <<- TRUE
+        invokeRestart("muffleWarning")
+      }
+    ),
+    error = function(e) NULL
+  )
+  list(fit = fit, rank_def = rank_def, singular = singular)
+}
+
+mixed_models_bili <- function(metadata, ID, bili_data, pheno_list,
+                              covariates = "Postnatal_Age") {
+  df <- metadata
+  row.names(df) <- df[[ID]]
+  df <- merge(df, bili_data, by = "row.names")
+  row.names(df) <- df$Row.names
+  df$Row.names <- NULL
+
+  Bile_acids <- colnames(bili_data)
+  cov_string <- paste(covariates, collapse = " + ")
+  Overall_result <- tibble()
+
+  for (BA in Bile_acids) {
+    if (!BA %in% colnames(df)) next
+    BA2 <- paste0("`", BA, "`")
+
+    for (pheno in pheno_list) {
+      if (!pheno %in% colnames(df)) next
+      pheno2 <- paste0("`", pheno, "`")
+
+      To_keep  <- df[[ID]][!is.na(df[[pheno]]) & !is.na(df[[BA]])]
+      df_pheno <- df[df[[ID]] %in% To_keep, ]
+      if (nrow(df_pheno) < 10) next
+
+      Model0 <- as.formula(paste0(BA2, " ~ ", cov_string, " + (1|MM_ID)"))
+      Model2 <- as.formula(paste0(BA2, " ~ ", cov_string, " + ",
+                                  pheno2, " + (1|MM_ID)"))
+
+      base <- fit_lmer_flagged(Model0, df_pheno)
+      full <- fit_lmer_flagged(Model2, df_pheno)
+      if (is.null(base$fit) || is.null(full$fit)) next
+
+      ## Positional LRT row — robust to how anova() names the models.
+      aov_tab <- as.data.frame(anova(full$fit, base$fit))
+      p_lrt   <- aov_tab[["Pr(>Chisq)"]][nrow(aov_tab)]
+
+      coefs <- as.data.frame(summary(full$fit)$coefficients)
+      ## (3) anchored: grep(pheno, ...) also matched longer coefficient names,
+      ## e.g. pheno "TFEF" matching a "TFEF_B..." row.
+      Summ  <- coefs[grep(paste0("^", pheno), rownames(coefs)), , drop = FALSE]
+      if (nrow(Summ) == 0) next
+
+      temp <- Summ %>%
+        rownames_to_column("Feature") %>%
+        as_tibble() %>%
+        mutate(P = p_lrt, N_samples = nrow(df_pheno),
+               N_infants = n_distinct(df_pheno$MM_ID),
+               Singular_fit = full$singular, Rank_def = full$rank_def,
+               BileAcid = BA, Pheno = pheno)
+
+      Overall_result <- rbind(Overall_result, temp)
+    }
+  }
+
+  p <- as.data.frame(Overall_result)
+  if (nrow(p) > 0) {
+    p$FDR <- NA_real_
+    keep <- !p$Rank_def
+    p$FDR[keep] <- p.adjust(p$P[keep], method = "BH")
+    ## (4) The FDR family: BH runs across every phenotype x coordinate pair in
+    ## ONE call, not per panel. Report it; it belongs in the figure legend.
+    attr(p, "fdr_family_size") <- sum(keep)
+  }
+  p
+}
+
+## -----------------------------------------------------------------------------
+## 6. Run the CLR analysis
+## -----------------------------------------------------------------------------
+metadata_only_ba <- bili_total_ba %>% select(-all_of(ba_cols))
+
+phenos <- c("prolonged_rupt","mmpercentage","surgery","ab48","apgar_1",
+            "apgar_5","multiple","delivery_md","maternal_atb","mother_st_com",
+            "placenta_ab","pe_hellp","maternal_infect","mother_b_hem",
+            "antibiotic_sample","probiotic_sample","ga_exact","bw","nec",
+            "sex","admissiontime","tpn_days","sip","sepsis_culture",
+            "pda_sign","mortality","week","probiotics","SGA","LGA","FGR",
+            "TFEF_B","TFEF","ivh","abtx")
+
+results_clr <- mixed_models_bili(
+  metadata   = metadata_only_ba,
+  ID         = "ID",
+  bili_data  = bili_clr_mat,
+  pheno_list = phenos
+)
+
+## (4) Report the multiple-testing family explicitly.
+cat("\n--- multiple testing ---\n")
+cat("  phenotypes tested:      ", n_distinct(results_clr$Pheno), "\n", sep = "")
+cat("  coordinates tested:     ", n_distinct(results_clr$BileAcid), "\n", sep = "")
+cat("  tests in the BH family: ", attr(results_clr, "fdr_family_size"), "\n", sep = "")
+cat("  -> FDR is adjusted across ALL phenotype x coordinate pairs jointly,\n",
+    "     not within panels. State this in the Figure 1E legend.\n", sep = "")
+
+results_clr_sig <- results_clr %>%
+  filter(!Rank_def, !Singular_fit, FDR < 0.05) %>%
+  arrange(FDR)
+
+write.csv(results_clr, p("1E_bileacid_full_screen.csv"), row.names = FALSE)
+
+## -----------------------------------------------------------------------------
+## 6b. What else associates with bile acids? (exploratory)
+## -----------------------------------------------------------------------------
+## The screen in section 6 already tests every phenotype against every
+## coordinate; this block only summarises it.
+
+clean <- results_clr %>% filter(!Rank_def, !Singular_fit, !is.na(P))
+
+## Which phenotypes have any signal, and how strong?
+pheno_summary <- clean %>%
+  group_by(Pheno) %>%
+  summarise(n_tested     = dplyr::n(),
+            n_FDR05      = sum(FDR < 0.05,  na.rm = TRUE),
+            n_FDR01      = sum(FDR < 0.01,  na.rm = TRUE),
+            n_FDR001     = sum(FDR < 0.001, na.rm = TRUE),
+            min_FDR      = min(FDR, na.rm = TRUE),
+            max_abs_beta = max(abs(Estimate), na.rm = TRUE),
+            .groups = "drop") %>%
+  filter(n_FDR05 > 0) %>%
+  arrange(desc(n_FDR05), min_FDR)
+
+cat("\n--- phenotypes associated with any bile acid coordinate ---\n")
+print(as.data.frame(pheno_summary %>%
+        mutate(across(c(min_FDR, max_abs_beta), ~ signif(.x, 3)))),
+      row.names = FALSE)
+
+## Is probiotic exposure really the dominant factor? Two criteria.
+cat("\n--- rank of `probiotics` ---\n")
+cat("  by number of coordinates at FDR<0.05: ",
+    which(pheno_summary$Pheno == "probiotics"), " of ",
+    nrow(pheno_summary), "\n", sep = "")
+cat("  by smallest FDR:                      ",
+    which(order(pheno_summary$min_FDR) ==
+          which(pheno_summary$Pheno == "probiotics")), "\n", sep = "")
+
+## Every non-probiotic hit, for the supplement.
+cat("\n--- all associations at FDR<0.05, excluding probiotic variables ---\n")
+print(as.data.frame(
+  clean %>%
+    filter(FDR < 0.05, !Pheno %in% c("probiotics", "probiotic_sample")) %>%
+    arrange(FDR) %>%
+    transmute(Pheno, BileAcid,
+              Beta = signif(Estimate, 3), SE = signif(`Std. Error`, 3),
+              FDR = signif(FDR, 3), N_samples, N_infants)),
+  row.names = FALSE)
+
+## Sensitivity: how much of that survives a stricter threshold?
+cat("\n--- surviving FDR<0.01 and FDR<0.001 (non-probiotic) ---\n")
+print(clean %>%
+  filter(!Pheno %in% c("probiotics", "probiotic_sample")) %>%
+  summarise(FDR05 = sum(FDR < 0.05, na.rm = TRUE),
+            FDR01 = sum(FDR < 0.01, na.rm = TRUE),
+            FDR001 = sum(FDR < 0.001, na.rm = TRUE)))
+
+write.csv(pheno_summary, p("1E_phenotype_summary.csv"), row.names = FALSE)
+
+## -----------------------------------------------------------------------------
+## 7. Figure
+## -----------------------------------------------------------------------------
+focus <- c("conj_unconj_lr", "CA", "TCA", "CDCA", "TCDCA")
+## (6) The first coordinate is a summary LOG-RATIO, not a CLR coordinate; the
+## facet label and the axis title now say so.
+focus_labels <- c("Con/Uncon", "CA", "TCA", "CDCA", "TCDCA")
+
+## Shared with figures 1C and 1F — define once, never retype the hex.
+PROBIOTIC_COLS <- c(No = "#4a3aa7", Yes = "#199e70")   # points, outlines
+PROBIOTIC_TINT <- c(No = "#dedcef", Yes = "#d6eee5")   # 18% tint: box fill
+
+plot_df <- bili_clr_mat %>%
+  rownames_to_column("ID") %>%
+  select(ID, any_of(focus)) %>%
+  left_join(bili_total_ba %>% select(ID, MM_ID, probiotics), by = "ID") %>%
+  filter(!is.na(probiotics)) %>%
+  pivot_longer(any_of(focus), names_to = "coord", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  mutate(probiotics = factor(probiotics, levels = c(0, 1),
+                             labels = c("No", "Yes")),
+         coord      = factor(coord, levels = focus, labels = focus_labels))
+
+fmt_p <- function(x) ifelse(is.na(x), "NA",
+                     ifelse(x < 0.001, "< 0.001", sprintf("%.3f", x)))
+
+pval_df <- results_clr %>%
+  filter(Pheno == "probiotics", BileAcid %in% focus) %>%
+  group_by(BileAcid) %>%
+  slice_min(P, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(coord = factor(BileAcid, levels = focus, labels = focus_labels),
+            label = paste0("FDR = ", fmt_p(FDR)))
+
+## Group sizes behind each panel, in samples and in infants — the number a
+## reviewer will ask for. Note that probiotic exposure is time-varying, so an
+## infant can contribute samples to both groups.
+cat("\n--- group sizes per panel ---\n")
+print(as.data.frame(
+  plot_df %>% group_by(coord, probiotics) %>%
+    summarise(n_samples = dplyr::n(),
+              n_infants = dplyr::n_distinct(MM_ID), .groups = "drop")),
+  row.names = FALSE)
+
+p_bile <- ggplot(plot_df, aes(probiotics, value)) +
+  geom_boxplot(aes(fill = probiotics, colour = probiotics),
+               width = 0.5, outlier.shape = NA, linewidth = 0.35) +
+  geom_jitter(aes(colour = probiotics), width = 0.12, alpha = 0.7,
+              size = 0.8, shape = 16, stroke = 0) +
+  geom_text(data = pval_df, aes(x = 1.5, y = Inf, label = label),
+            inherit.aes = FALSE, vjust = 1.2, size = 2.1, lineheight = 0.9,
+            colour = "grey20") +
+  facet_wrap(~ coord, scales = "free_y", nrow = 1) +
+  scale_fill_manual(values = PROBIOTIC_TINT, guide = "none") +
+  scale_colour_manual(values = PROBIOTIC_COLS, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.22))) +
+  labs(x = "Probiotic exposure", y = "log-ratio") +
+  theme_classic(base_size = 9) +
+  theme(strip.background = element_blank(),
+        strip.text       = element_text(face = "bold", size = 7.5,
+                                        margin = margin(b = 2)),
+        axis.text        = element_text(size = 7),
+        axis.text.x      = element_text(margin = margin(t = 1)),
+        axis.title       = element_text(size = 8),
+        axis.ticks       = element_line(linewidth = 0.3),
+        axis.line        = element_line(linewidth = 0.3),
+        panel.spacing    = unit(3, "pt"),
+        plot.margin      = margin(4, 4, 4, 4))
+
+print(p_bile)
+
+ggsave(p("1E_Bileacid_probiotics_association.pdf"), plot = p_bile,
+       width = 5, height = 3.2)
+
+# ── LEGEND NUMBERS: Fig. 1e ───────────────────────────────────────────────────
+plot_samples_1e <- plot_df %>% dplyr::distinct(ID, MM_ID, probiotics)
+legend_out("Fig 1e — plotted samples / infants (total)", plot_samples_1e %>% n_si())
+legend_out("Fig 1e — plotted samples / infants by probiotic status",
+           plot_samples_1e %>% n_si(probiotics))
+legend_out("Fig 1e — samples / infants per panel and group",
+           plot_df %>% n_si(coord, probiotics))
+legend_out("Fig 1e — bile acid table",
+           sprintf("samples with any bile acid > 0: %d | species retained: %d | zero replacement: %s",
+                   nrow(ba_raw), ncol(ba_raw),
+                   if (identical(ba_repl, ba_repl_simple)) "min/2 (fallback)" else "cmultRepl CZM"))
+legend_out("Fig 1e — BH family",
+           sprintf("phenotypes: %d | coordinates (incl. con/uncon log-ratio): %d | tests: %d",
+                   dplyr::n_distinct(results_clr$Pheno), dplyr::n_distinct(results_clr$BileAcid),
+                   attr(results_clr, "fdr_family_size")))
+legend_out("Fig 1e — probiotics, per plotted coordinate",
+           results_clr %>% filter(Pheno == "probiotics", BileAcid %in% focus) %>%
+             transmute(BileAcid, Beta = signif(Estimate, 3), SE = signif(`Std. Error`, 3),
+                       P = signif(P, 3), FDR = signif(FDR, 3), N_samples, N_infants,
+                       Singular_fit, Rank_def))
+
+sessionInfo()
+```
+```{r}
+## Figure 1F — Bile salt hydrolase (BSH) gene detection and abundance
+
+library(tidyverse)
+library(lme4)
+library(lmerTest)
+library(blme)
+library(patchwork)
+
+## Set to the directory holding the input files. Paths are built from this so
+## the script does not depend on the working directory.
+DATA_DIR <- "."
+p <- function(f) file.path(DATA_DIR, f)
+
+set.seed(42)   # geom_jitter is random; fix it so the figure is reproducible
+
+## ---- Parameters -------------------------------------------------------------
+MIN_PREVALENCE  <- 10   # % of infant samples a marker must reach to be screened
+MIN_GROUP_N     <- 5    # minimum detected samples per group for the abundance fit
+
+FOCUS <- c(
+  "SBA_PROT_ALL_000062",   # WP_007052221.1, BSH, Bifidobacterium longum
+  "SBA_PROT_ALL_000048"    # WP_004217908.1, BSH, B. animalis subsp. lactis
+)
+FOCUS_LABELS <- c(
+  SBA_PROT_ALL_000062 = "BSH~(italic('B. longum'))",
+  SBA_PROT_ALL_000048 = "BSH~(italic('B. animalis'))"
+)
+
+## Shared with Figures 1C and 1E — defined once.
+PROBIOTIC_COLS <- c(No = "#4a3aa7", Yes = "#199e70")   # points, outlines
+PROBIOTIC_TINT <- c(No = "#dedcef", Yes = "#d6eee5")   # box fill
+
+## ---- STEP 1. ShortBRED matrix ----------------------------------------------
+SBA <- read.delim(p("ShortBRED_Bile_acids_Count_matrix.tsv"), check.names = FALSE)
+
+## Sample IDs: B002_20_4C09_EKDN... -> B002_20_4C09
+SBA$ID <- sub("^([^_]+_[^_]+_[^_]+).*", "\\1", SBA$Sample)
+
+## The two MG10 samples are the sequenced ProPrems product, not infant stool.
+SBA$ID[SBA$ID == "MG10BOMPC1_ZKDN250026178-1A_2323WCLT3"] <- "P300_00_13H1"
+SBA$ID[SBA$ID == "MG10BOMPC2_ZKDN250026179-1A_2323WCLT3"] <- "P300_00_13H2"
+
+gene_cols <- setdiff(colnames(SBA), c("Sample", "ID"))
+
+## Normalisation diagnostic. If these were raw counts, every non-zero value in a
+## sample would be an integer multiple of a common per-sample constant and the
+## per-sample minimum would be ~1. Neither holds, which is the signature of
+## division by BOTH marker length and library size, i.e. RPKM.
+.d <- as.matrix(SBA[, gene_cols])
+cat("\n--- Normalisation diagnostic ---\n")
+cat("  all non-zero values integer? ",
+    isTRUE(all.equal(.d[.d > 0], round(.d[.d > 0]))), "\n", sep = "")
+cat("  distinct per-sample minimum non-zero values: ",
+    length(unique(apply(.d, 1, function(x) { x <- x[x > 0]
+                                             if (length(x)) min(x) else NA }))),
+    " of ", nrow(.d), " samples\n", sep = "")
+rm(.d)
+
+## ---- STEP 2. Metadata, infants only ----------------------------------------
+metadata <- read.table(p("meta_with_placental_subtypes.txt"), header = TRUE,
+                       quote = "\"", na.strings = c("NA", ""),
+                       stringsAsFactors = FALSE, comment.char = "")
+rownames(metadata) <- metadata$ID
+
+meta_inf_all <- metadata[grep("^B", rownames(metadata)), ]
+for (v in c("MM_ID", "Postnatal_Age", "Clean_reads_P1", "DNA_conc"))
+  meta_inf_all[[v]] <- as.numeric(meta_inf_all[[v]])
+meta_inf_all$probiotics <- factor(as.character(meta_inf_all$probiotics),
+                                  levels = c("0", "1"), labels = c("No", "Yes"))
+
+common   <- intersect(meta_inf_all$ID, SBA$ID)
+meta_inf <- meta_inf_all[match(common, meta_inf_all$ID), ]
+SBA_inf  <- SBA[match(common, SBA$ID), ]
+stopifnot(identical(meta_inf$ID, SBA_inf$ID))
+
+abund <- as.matrix(sapply(SBA_inf[, gene_cols, drop = FALSE], as.numeric))
+rownames(abund) <- SBA_inf$ID
+
+cat("\ninfant samples with ShortBRED data: ", nrow(abund),
+    " | with no marker detected: ", sum(rowSums(abund > 0) == 0), "\n", sep = "")
+
+## ---- STEP 3. Marker screen set ---------------------------------------------
+prev           <- colMeans(abund > 0) * 100
+screen_markers <- names(prev)[prev >= MIN_PREVALENCE]
+cat("markers screened: ", length(screen_markers), " of ", length(gene_cols),
+    " (prevalence >= ", MIN_PREVALENCE, "%)\n", sep = "")
+stopifnot(all(FOCUS %in% sub("\\|.*", "", screen_markers)))
+
+## Bai genes are essentially absent: the preterm gut here has almost no
+## 7alpha-dehydroxylation capacity, so true secondary bile acids cannot form.
+subfam <- sub(".*gene_subfamily=([^|]*).*", "\\1", gene_cols)
+cat("\nmax infant prevalence by gene subfamily (%):\n")
+print(round(tapply(prev, subfam, max), 1))
+
+## ---- STEP 4. Modelling table ------------------------------------------------
+## Clean_reads_P1 is ~1e6-1e7; on that scale glmer's optimiser fails outright,
+## so covariates are z-scaled for the models. Plotted values are untouched.
+COVARIATES <- c("Clean_reads_P1", "DNA_conc", "Postnatal_Age")
+cov_string <- paste0(COVARIATES, "_z", collapse = " + ")
+
+base_df <- meta_inf %>%
+  select(ID, MM_ID, all_of(COVARIATES), probiotics) %>%
+  filter(if_all(c(all_of(COVARIATES), probiotics), ~ !is.na(.))) %>%
+  mutate(across(all_of(COVARIATES), ~ as.numeric(scale(.x)), .names = "{.col}_z"))
+
+cat("\ninfants per exposure group (sum exceeds the infant count because",
+    "exposure is time-varying):\n")
+print(tapply(base_df$MM_ID, base_df$probiotics, function(x) length(unique(x))))
+cat("distinct infants: ", n_distinct(base_df$MM_ID), "\n", sep = "")
+
+## ---- STEP 5. Model machinery ------------------------------------------------
+fit_lmm <- function(formula, data) {
+  singular <- FALSE
+  fit <- tryCatch(
+    withCallingHandlers(
+      lmer(formula, data, REML = FALSE),
+      warning = function(w) {
+        if (grepl("singular", conditionMessage(w), ignore.case = TRUE))
+          singular <<- TRUE
+        invokeRestart("muffleWarning")
+      }),
+    error = function(e) NULL)
+  list(fit = fit, singular = singular)
+}
+
+## Penalised logistic mixed model: a weakly informative normal prior on the
+## fixed effects regularises the diverging coefficient under separation while
+## retaining the (1|MM_ID) random intercept.
+fit_penalised <- function(formula, data) {
+  tryCatch(
+    bglmer(formula, data = data, family = binomial,
+           fixef.prior = normal(sd = 3),
+           control = glmerControl(optimizer = "bobyqa",
+                                  optCtrl = list(maxfun = 2e5))),
+    error = function(e) { message("bglmer failed: ", conditionMessage(e)); NULL })
+}
+
+lrt_p <- function(m1, m0) {
+  a <- anova(m1, m0)
+  a[["Pr(>Chisq)"]][nrow(a)]        # positional: works for lmer and glmer alike
+}
+
+run_detection <- function(df) {
+  f0 <- as.formula(paste0("detected ~ ", cov_string, " + (1|MM_ID)"))
+  f1 <- as.formula(paste0("detected ~ ", cov_string, " + probiotics + (1|MM_ID)"))
+  m0 <- fit_penalised(f0, df); m1 <- fit_penalised(f1, df)
+  if (is.null(m0) || is.null(m1))
+    return(tibble(Note = "penalised fit failed", N_samples = nrow(df),
+                  N_infants = n_distinct(df$MM_ID)))
+  cf  <- as.data.frame(summary(m1)$coefficients)
+  rw  <- cf[grep("^probiotics", rownames(cf)), , drop = FALSE]
+  est <- rw[[1]][1]; se <- rw[[2]][1]
+  tibble(Estimate = est, SE = se, P = lrt_p(m1, m0),
+         OR = exp(est), OR_lo = exp(est - 1.96 * se), OR_hi = exp(est + 1.96 * se),
+         N_samples = nrow(df), N_infants = n_distinct(df$MM_ID),
+         Note = NA_character_)
+}
+
+run_abundance <- function(df) {
+  f0 <- as.formula(paste0("log_value ~ ", cov_string, " + (1|MM_ID)"))
+  f1 <- as.formula(paste0("log_value ~ ", cov_string, " + probiotics + (1|MM_ID)"))
+  m0 <- fit_lmm(f0, df); m1 <- fit_lmm(f1, df)
+  if (is.null(m0$fit) || is.null(m1$fit))
+    return(tibble(Note = "model failed", N_samples = nrow(df),
+                  N_infants = n_distinct(df$MM_ID)))
+  cf <- as.data.frame(summary(m1$fit)$coefficients)
+  rw <- cf[grep("^probiotics", rownames(cf)), , drop = FALSE]
+  tibble(Estimate = rw[[1]][1], SE = rw[[2]][1], P = lrt_p(m1$fit, m0$fit),
+         N_samples = nrow(df), N_infants = n_distinct(df$MM_ID),
+         Singular = m1$singular, Note = NA_character_)
+}
+
+## ---- STEP 6. Separation diagnostic and the two-part screen -------------------
+sep_table <- map_dfr(screen_markers, function(g) {
+  d <- base_df %>% mutate(det = abund[match(ID, rownames(abund)), g] > 0)
+  tibble(Marker = g,
+         n_No  = sum(d$probiotics == "No"),
+         k_No  = sum(d$det[d$probiotics == "No"]),
+         n_Yes = sum(d$probiotics == "Yes"),
+         k_Yes = sum(d$det[d$probiotics == "Yes"]),
+         separation = if (any(table(d$probiotics, d$det) == 0)) "complete" else "none")
+})
+cat("\n--- separation diagnostic ---\n")
+print(as.data.frame(sep_table %>% mutate(Marker = sub("\\|.*", "", Marker))),
+      row.names = FALSE)
+
+res_detect <- map_dfr(screen_markers, function(g) {
+  df <- base_df %>%
+    mutate(detected = as.integer(abund[match(ID, rownames(abund)), g] > 0))
+  if (n_distinct(df$detected) < 2)
+    return(tibble(Marker = g, Note = "no variation in detection"))
+  run_detection(df) %>% mutate(Marker = g)
+}) %>% mutate(Part = "Detection")
+
+res_abund <- map_dfr(screen_markers, function(g) {
+  df <- base_df %>%
+    mutate(value = abund[match(ID, rownames(abund)), g]) %>%
+    filter(value > 0) %>%
+    mutate(log_value = log10(value))
+  n_grp <- table(factor(df$probiotics, levels = c("No", "Yes")))
+  if (any(n_grp < MIN_GROUP_N))
+    return(tibble(Marker = g, N_samples = nrow(df),
+                  N_infants = n_distinct(df$MM_ID),
+                  Note = sprintf("not estimable: detected in n=%d (No), n=%d (Yes)",
+                                 n_grp[["No"]], n_grp[["Yes"]])))
+  run_abundance(df) %>% mutate(Marker = g)
+}) %>% mutate(Part = "Abundance")
+
+add_fdr <- function(d) {
+  d$FDR <- NA_real_
+  ok <- !is.na(d$P)
+  if ("Singular" %in% names(d)) ok <- ok & (is.na(d$Singular) | !d$Singular)
+  d$FDR[ok] <- p.adjust(d$P[ok], method = "BH")
+  d
+}
+
+## Markers present in the sequenced ProPrems product are the administered
+## strains' own genes, by direct observation rather than inference.
+product <- SBA[SBA$ID %in% c("P300_00_13H1", "P300_00_13H2"), ]
+product_markers <- if (nrow(product)) {
+  pm <- as.matrix(product[, gene_cols, drop = FALSE])
+  colnames(pm)[colSums(pm > 0) > 0]
+} else character(0)
+
+results_bsh <- bind_rows(add_fdr(res_detect), add_fdr(res_abund)) %>%
+  left_join(sep_table, by = "Marker") %>%
+  mutate(Subfamily  = sub(".*gene_subfamily=([^|]*).*", "\\1", Marker),
+         Marker_id  = sub("\\|.*", "", Marker),
+         In_product = Marker %in% product_markers,
+         Plotted    = Marker_id %in% FOCUS) %>%
+  arrange(Part, FDR)
+
+cat("\n--- tests performed (the FDR family; state this in the legend) ---\n")
+print(results_bsh %>% filter(!is.na(P)) %>% dplyr::count(Part))
+cat("\n--- significant at FDR < 0.05 ---\n")
+print(as.data.frame(results_bsh %>% filter(FDR < 0.05) %>%
+        select(Part, Subfamily, Marker_id, In_product, Plotted, separation,
+               Estimate, SE, OR, OR_lo, OR_hi, P, FDR, N_samples, N_infants)),
+      row.names = FALSE)
+
+write.csv(results_bsh, p("1F_BSH_probiotics_full_screen.csv"), row.names = FALSE)
+
+if (nrow(product)) {
+  pm <- as.matrix(product[, gene_cols, drop = FALSE]); rownames(pm) <- product$ID
+  hits <- colnames(pm)[colSums(pm > 0) > 0]
+  cat("\n--- markers detected in the sequenced ProPrems product (n = ",
+      nrow(product), ") ---\n", sep = "")
+  print(data.frame(marker    = sub("\\|.*", "", hits),
+                   subfamily = sub(".*gene_subfamily=([^|]*).*", "\\1", hits),
+                   t(round(pm[, hits, drop = FALSE], 2))), row.names = FALSE)
+}
+
+## ---- STEP 7. Figure ---------------------------------------------------------
+FIG <- "1F"   # change to "1G" if the panel is renumbered; used for filenames
+
+focus_cols <- vapply(FOCUS, function(f) {
+  hit <- grep(f, gene_cols, value = TRUE); stopifnot(length(hit) == 1); hit
+}, character(1))
+
+plot_df <- base_df %>%
+  bind_cols(as.data.frame(
+    abund[match(base_df$ID, rownames(abund)), focus_cols, drop = FALSE])) %>%
+  pivot_longer(all_of(unname(focus_cols)), names_to = "Marker",
+               values_to = "value") %>%
+  mutate(marker_id = sub("\\|.*", "", Marker),
+         panel     = factor(marker_id, levels = FOCUS,
+                            labels = FOCUS_LABELS[FOCUS]),
+         detected  = value > 0)
+
+fmt_p <- function(x) ifelse(is.na(x), "NA",
+                     ifelse(x < 0.001, "< 0.001", sprintf("%.3f", x)))
+
+## FDR from the abundance half of the two-part screen.
+lab_abund <- results_bsh %>%
+  filter(Part == "Abundance", Marker_id %in% FOCUS) %>%
+  transmute(panel = factor(Marker_id, levels = FOCUS,
+                           labels = FOCUS_LABELS[FOCUS]),
+            label = ifelse(is.na(P), "", paste0("FDR = ", fmt_p(FDR))))
+
+## Detection counts are still computed — they are the numbers for the text, and
+## they identify any group with nothing to plot.
+det_df <- plot_df %>%
+  group_by(panel, probiotics) %>%
+  summarise(n = dplyr::n(), k = sum(detected),
+            n_infants = n_distinct(MM_ID), .groups = "drop") %>%
+  mutate(pct = k / n * 100)
+
+## Groups with no detected samples get an explicit annotation, not a blank gap.
+empty_df <- det_df %>%
+  filter(k == 0) %>%
+  transmute(panel, probiotics,
+            label = "not detected")
+
+p_fig <- plot_df %>%
+  filter(detected) %>%
+  ggplot(aes(probiotics, log10(value))) +
+  geom_boxplot(aes(fill = probiotics, colour = probiotics),
+               width = 0.5, outlier.shape = NA, linewidth = 0.35) +
+  geom_jitter(aes(colour = probiotics), width = 0.12, alpha = 0.7,
+              size = 0.8, shape = 16, stroke = 0) +
+  geom_text(data = lab_abund, aes(x = 1.5, y = Inf, label = label),
+            inherit.aes = FALSE, vjust = 1.2, size = 2.1, colour = "grey20") +
+  geom_text(data = empty_df, aes(x = probiotics, y = -Inf, label = label),
+            inherit.aes = FALSE, vjust = -0.3, size = 1.9, lineheight = 0.9,
+            colour = "grey45") +
+  facet_wrap(~ panel, nrow = 1, labeller = label_parsed) +
+  scale_x_discrete(drop = FALSE) +
+  scale_fill_manual(values = PROBIOTIC_TINT, guide = "none") +
+  scale_colour_manual(values = PROBIOTIC_COLS, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0.12, 0.20))) +
+  labs(x = "Probiotic exposure",
+       y = expression(log[10]~"RPKM")) +
+  theme_classic(base_size = 9) +
+  theme(strip.background = element_blank(),
+        strip.text       = element_text(face = "bold", size = 7.5,
+                                        margin = margin(b = 2)),
+        axis.text        = element_text(size = 7),
+        axis.text.x      = element_text(margin = margin(t = 1)),
+        axis.title       = element_text(size = 8),
+        axis.ticks       = element_line(linewidth = 0.3),
+        axis.line        = element_line(linewidth = 0.3),
+        panel.spacing    = unit(4, "pt"),
+        plot.margin      = margin(4, 4, 4, 4))
+
+print(p_fig)
+
+ggsave(p(paste0(FIG, "_BSH_probiotics_association.pdf")), plot = p_fig,
+       width = 4, height = 2.9)
+
+## ---- Numbers for the text and legend ---------------------------------------
+## Detection percentages are no longer plotted, so report them here: they are
+## what the legend needs to explain the empty cell.
+cat("\n--- detection (reported in text, not plotted) ---\n")
+print(as.data.frame(det_df %>%
+        mutate(pct = round(pct, 1)) %>%
+        select(panel, probiotics, k, n, pct, n_infants)), row.names = FALSE)
+
+cat("\n--- abundance panel: detected samples only ---\n")
+print(as.data.frame(
+  plot_df %>% filter(detected) %>%
+    group_by(panel, probiotics) %>%
+    summarise(n_samples = dplyr::n(), n_infants = n_distinct(MM_ID),
+              median_RPKM = signif(median(value), 3), .groups = "drop")),
+  row.names = FALSE)
+
+## ---- LEGEND NUMBERS: Fig. 1f ---------------------------------------------
+legend_out("Fig 1f — modelling table (samples; infants) by probiotic status",
+           base_df %>% n_si(probiotics))
+legend_out("Fig 1f — modelling table total", base_df %>% n_si())
+legend_out("Fig 1f — detection per marker and group (k detected of n samples)",
+           det_df %>% mutate(pct = round(pct, 1)) %>%
+             transmute(panel = as.character(panel), probiotics, k, n, pct, n_infants))
+legend_out("Fig 1f — plotted (detected) samples / infants",
+           plot_df %>% filter(detected) %>%
+             dplyr::group_by(marker_id, probiotics) %>%
+             dplyr::summarise(n_samples = dplyr::n(), n_infants = dplyr::n_distinct(MM_ID),
+                              .groups = "drop"))
+legend_out("Fig 1f — BH family size per part (markers with a P value)",
+           results_bsh %>% filter(!is.na(FDR)) %>% dplyr::count(Part, name = "n_tests"))
+legend_out("Fig 1f — screened markers",
+           sprintf("%d of %d markers at >= %d%% prevalence in infant samples",
+                   length(screen_markers), length(gene_cols), MIN_PREVALENCE))
+legend_out("Fig 1f — results for the two plotted markers",
+           results_bsh %>% filter(Plotted) %>%
+             transmute(Part, Marker_id, Estimate = signif(Estimate, 3), SE = signif(SE, 3),
+                       OR = signif(OR, 3), OR_lo = signif(OR_lo, 3), OR_hi = signif(OR_hi, 3),
+                       P = signif(P, 3), FDR = signif(FDR, 3), N_samples, N_infants,
+                       separation, In_product, Note))
+
+sessionInfo()
+
+```
+
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# FIGURE 1G — complete pipeline
+# ══════════════════════════════════════════════════════════════════════════════
+
+library(dplyr)
+library(purrr)
+library(tibble)
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+
+# plyr / plotly / lmerTest mask dplyr verbs — pin them
+select    <- dplyr::select
+filter    <- dplyr::filter
+mutate    <- dplyr::mutate
+summarise <- dplyr::summarise
+arrange   <- dplyr::arrange
+rename    <- dplyr::rename
+group_by  <- dplyr::group_by
+count     <- dplyr::count
+
+META_FILE <- "meta_with_placental_subtypes.txt"
+
+# ── Screening thresholds ──────────────────────────────────────────────────────
+# Two rules, both counted by distinct infant. A categorical phenotype is
+# modelled only if BOTH hold; continuous phenotypes need only MIN_TOTAL_INFANTS.
+MIN_LEVEL_INFANTS  <- 5      # distinct infants required in EACH level
+MIN_TOTAL_INFANTS  <- 10     # distinct infants required for a continuous phenotype
+MAX_MAJORITY_SHARE <- 0.95   # largest level may hold at most this share of infants
+                             # (the LLNEXT pipeline's minimum_variance = 5)
+
+# Declared factor level that never occurs in the data (e.g. "diffuse"
+# chorangiosis, absent from this export):
+#   "drop_level"  -> remove it, model the remaining levels
+#   "drop_factor" -> do not model the phenotype at all
+EMPTY_LEVEL_ACTION <- "drop_level"
+
+# ── Identifiers ───────────────────────────────────────────────────────────────
+# "ID" is the SAMPLE identifier (577 infant rows, 577 unique values); "MM_ID" is
+# the INFANT identifier (133 infants). mixed_models() uses its `ID` argument
+# only to set row names before merging with the CLR table, so it must be the
+# sample id. The random intercept is (1|MM_ID) inside the function, so repeated
+# sampling is handled there; INFANT_ID is used by the screen.
+INFANT_ID <- "MM_ID"
+SAMPLE_ID <- "ID"
+
+# Print every row whether the object is a tibble or a plain data.frame.
+# (print(n = Inf) on a data.frame partially matches 'na.print' and errors.)
+print_all <- function(df) {
+  if (nrow(df) == 0) { cat("  (none)\n"); return(invisible(NULL)) }
+  print(as.data.frame(df), row.names = FALSE)
+  invisible(NULL)
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LABELS
+# ══════════════════════════════════════════════════════════════════════════════
+# Every variable in pheno_list has an entry; the check before plotting warns
+# about any that do not.
+PHENOTYPE_LABELS <- c(
+  # ── maternal / obstetric ──────────────────────────────────────────────────
+  "prolonged_rupt"    = "Prolonged Rupture of Membranes",
+  "multiple"          = "Multiple Pregnancy",
+  "delivery_md"       = "Delivery Mode",
+  "maternal_atb"      = "Maternal Antibiotics",
+  "maternal_ab48"     = "Maternal Antibiotics (48h)",
+  "mother_st"         = "Antenatal Corticosteroids (any)",
+  "mother_st_com"     = "Antenatal Corticosteroids (complete)",
+  "pe_hellp"          = "Pre-eclampsia / HELLP",
+  "maternal_infect"   = "Maternal Infection",
+  "mother_b_hem"      = "Maternal Group B Streptococcus",
+  "primiparous"       = "Primiparous",
+  "parities_nb"       = "Parity",
+
+  # ── infant characteristics ────────────────────────────────────────────────
+  "ga_exact"          = "Gestational Age",
+  "bw"                = "Birth Weight",
+  "sex"               = "Sex",
+  "apgar_1"           = "Apgar Score (1 min)",
+  "apgar_5"           = "Apgar Score (5 min)",
+  "SGA"               = "Small for Gestational Age",
+  "LGA"               = "Large for Gestational Age",
+  "FGR"               = "Fetal Growth Restriction",
+  "admissiontime"     = "Admission Duration",
+  "week"              = "Postnatal Week",
+  "Postnatal_Age"     = "Postnatal Age",
+
+  # ── treatment / exposure ──────────────────────────────────────────────────
+  "ab48"              = "Antibiotics in First 48h",
+  "abtx"              = "Antibiotic Treatment",
+  "antibiotic_sample" = "Days of Antibiotic Use",
+  "antibiotic"        = "Days of Antibiotic Use",
+  "probiotics"        = "Probiotics",
+  "probiotic_sample"  = "Days of Probiotic Use",
+  "probiotics_sample" = "Days of Probiotic Use",
+  "tpn_days"          = "Duration of Parenteral Nutrition",
+  "TFEF"              = "Time to Full Enteral Feeds",
+  "TFEF_B"            = "Time to Full Enteral Feeds (dichotomised)",
+  "mmpercentage"      = "Mother's Own Milk (%)",
+  "surgery"           = "Surgery",
+  "surgery_nec"       = "Surgery for NEC",
+  "rbc_tx_48"         = "Red Cell Transfusion (48h)",
+
+  # ── outcomes / morbidity ──────────────────────────────────────────────────
+  "nec"               = "Necrotizing Enterocolitis",
+  "nec_bell"          = "NEC (Bell Stage)",
+  "sip"               = "Spontaneous Intestinal Perforation",
+  "sepsis"            = "Sepsis",
+  "sepsis_culture"    = "Culture-proven Sepsis",
+  "sepsis_crp"        = "Sepsis (CRP-defined)",
+  "pda"               = "Patent Ductus Arteriosus",
+  "pda_sign"          = "Haemodynamically Significant PDA",
+  "ivh"               = "Intraventricular Haemorrhage",
+  "mortality"         = "Mortality",
+
+  # ── placental pathology ───────────────────────────────────────────────────
+  "mvm"               = "Maternal Vascular Malperfusion",
+  "fvm"               = "Fetal Vascular Malperfusion",
+  "fh"                = "Increased Nucleated Fetal Erythrocytes",
+  "hypoplasia"        = "Placental Hypoplasia (weight <p10)",
+  "placenta_ab"       = "Any Placental Abnormality",
+  "placental_weight"  = "Placental Weight",
+  "fvm_high_grade"    = "Fetal Vascular Malperfusion (High Grade)",
+  "vue_high_grade"    = "Villitis of Unknown Aetiology (High Grade)",
+  "fvm_type"          = "Fetal Vascular Malperfusion",
+  "ch_type"           = "Chorangiosis",
+  "ca_type"           = "Chorioamnionitis",
+  "vue_type"          = "Villitis of Unknown Aetiology"
+)
+
+# Pretty forms for subtype levels, used for "<base>__<level>" contrast names.
+LEVEL_LABELS <- c(
+  "low grade"                   = "Low Grade",
+  "high grade"                  = "High Grade",
+  "segmental"                   = "Segmental",
+  "diffuse"                     = "Diffuse",
+  "maternal response only"      = "Maternal Response Only",
+  "maternal and fetal response" = "Maternal and Fetal Response"
+)
+
+# Exact match; else "<base>__<level>" assembled from both maps; else title-case
+# (and reported, so nothing reaches the figure unnoticed).
+clean_phenotype_name <- function(name) {
+  vapply(name, function(nm) {
+    if (nm %in% names(PHENOTYPE_LABELS)) return(unname(PHENOTYPE_LABELS[nm]))
+    if (grepl("__", nm, fixed = TRUE)) {
+      parts <- strsplit(nm, "__", fixed = TRUE)[[1]]
+      base  <- parts[1]
+      lvl   <- paste(parts[-1], collapse = "__")
+      base_lab <- if (base %in% names(PHENOTYPE_LABELS))
+        unname(PHENOTYPE_LABELS[base]) else tools::toTitleCase(gsub("_", " ", base))
+      lvl_lab  <- if (lvl %in% names(LEVEL_LABELS))
+        unname(LEVEL_LABELS[lvl]) else tools::toTitleCase(lvl)
+      return(sprintf("%s (%s)", base_lab, lvl_lab))
+    }
+    stripped <- gsub("_sample$", "", nm)
+    if (stripped %in% names(PHENOTYPE_LABELS))
+      return(unname(PHENOTYPE_LABELS[stripped]))
+    tools::toTitleCase(gsub("_", " ", nm))
+  }, FUN.VALUE = character(1), USE.NAMES = FALSE)
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 1 — read metadata, restrict to infant samples
+# ══════════════════════════════════════════════════════════════════════════════
+# write.table() output: whitespace separated, quoted, with a leading row-name
+# column that read.table() consumes automatically. quote = "\"" is required
+# because several placental levels contain spaces ("maternal response only").
+metadata_all <- read.table(META_FILE, header = TRUE, quote = "\"",
+                           na.strings = c("NA", ""), stringsAsFactors = FALSE,
+                           comment.char = "")
+
+cat(sprintf("Read %d rows x %d columns from %s\n",
+            nrow(metadata_all), ncol(metadata_all), META_FILE))
+cat("SampleType breakdown:\n"); print(table(metadata_all$SampleType, useNA = "ifany"))
+
+metadata_infant <- metadata_all[metadata_all$SampleType == "infant", , drop = FALSE]
+rownames(metadata_infant) <- metadata_infant[[SAMPLE_ID]]
+
+cat(sprintf("\nInfant samples: %d   distinct infants: %d   median samples/infant: %.0f\n",
+            nrow(metadata_infant),
+            dplyr::n_distinct(metadata_infant[[INFANT_ID]]),
+            median(table(metadata_infant[[INFANT_ID]]))))
+
+# mixed_models() sets row.names from its ID argument, so it must be unique per
+# row; it hardcodes (1|MM_ID) and Postnatal_Age, so those must exist.
+if (anyDuplicated(metadata_infant[[SAMPLE_ID]]))
+  stop("SAMPLE_ID is not unique per row — mixed_models() will fail on row.names.")
+for (needed in c("MM_ID", "Postnatal_Age", "Clean_reads_P1", "DNA_conc")) {
+  if (!needed %in% colnames(metadata_infant))
+    stop("mixed_models() requires the column '", needed, "', which is not in the metadata.")
+}
+if (max(table(metadata_infant[[INFANT_ID]])) < 2)
+  warning("Every infant has a single sample — (1|MM_ID) will be singular.", call. = FALSE)
+
+# ── Pin reference levels for the subtype factors ──────────────────────────────
+# Without this the factors take the default alphabetical reference (e.g.
+# "maternal and fetal response" sorts before "none"), which is clinically
+# backwards.
+subtype_levels <- list(
+  fvm_type = c("none", "low grade", "high grade"),
+  ch_type  = c("none", "segmental", "diffuse"),
+  ca_type  = c("none", "maternal response only", "maternal and fetal response"),
+  vue_type = c("none", "low grade", "high grade")
+)
+for (v in names(subtype_levels)) {
+  if (!v %in% colnames(metadata_infant)) { cat("!! missing column:", v, "\n"); next }
+  unmatched <- setdiff(unique(na.omit(as.character(metadata_infant[[v]]))),
+                       subtype_levels[[v]])
+  if (length(unmatched) > 0)
+    warning(sprintf("%s: values not in the declared levels become NA -> %s",
+                    v, paste(unmatched, collapse = "; ")), call. = FALSE)
+  metadata_infant[[v]] <- factor(metadata_infant[[v]], levels = subtype_levels[[v]])
+}
+
+# FVM/VUE collapsed to "high grade present" (1) vs everything else (0), with
+# "none" and "low grade" both in the reference. NA stays NA (not assessed).
+metadata_infant$fvm_high_grade <- ifelse(
+  is.na(metadata_infant$fvm_type), NA_real_,
+  as.numeric(as.character(metadata_infant$fvm_type) == "high grade")
+)
+metadata_infant$vue_high_grade <- ifelse(
+  is.na(metadata_infant$vue_type), NA_real_,
+  as.numeric(as.character(metadata_infant$vue_type) == "high grade")
+)
+
+pheno_list <- c(
+  "prolonged_rupt", "mmpercentage", "surgery", "ab48", "apgar_1",
+  "apgar_5", "multiple", "delivery_md", "maternal_atb", "mother_st_com",
+  "pe_hellp", "maternal_infect", "mother_b_hem",
+  "antibiotic_sample", "probiotic_sample", "ga_exact", "bw", "nec",
+  "sex", "admissiontime", "tpn_days", "sip", "sepsis_culture",
+  "pda_sign", "mortality", "week", "probiotics", "SGA",
+  "LGA", "FGR", "TFEF_B", "TFEF", "ivh", "abtx",
+  # ── placental pathology ───────────────────────────────────────────────────
+  # placenta_ab dropped, as in the binary version. ch/ca as subtype factors;
+  # fvm/vue as the "high grade present" binaries above; mvm, fh and hypoplasia
+  # have no subtype breakdown. dvi/chiv/mfi/mpvfd are all-zero in this export.
+  "mvm", "fh", "hypoplasia", "fvm_high_grade", "vue_high_grade",
+  "ch_type", "ca_type"
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 2 — screen phenotypes on number of infants per level
+# ══════════════════════════════════════════════════════════════════════════════
+# Categorical = factor / character / logical, or numeric with <= 2 distinct
+# values (0/1 flags). Numeric with more distinct values (ga_exact, bw, apgar_1,
+# tpn_days, TFEF, week, ...) is continuous; the per-level rule does not apply.
+is_categorical_pheno <- function(x) {
+  if (is.factor(x) || is.character(x) || is.logical(x)) return(TRUE)
+  if (is.numeric(x)) return(length(unique(x[!is.na(x)])) <= 2)
+  TRUE
+}
+
+build_infant_level_counts <- function(metadata, phenos, id_col = INFANT_ID,
+                                      min_level_n = MIN_LEVEL_INFANTS,
+                                      min_total_n = MIN_TOTAL_INFANTS) {
+  map_dfr(intersect(phenos, colnames(metadata)), function(pheno) {
+    raw <- metadata[[pheno]]
+    ok  <- !is.na(raw)
+    ids <- metadata[[id_col]][ok]
+    if (!is_categorical_pheno(raw)) {
+      n_inf <- dplyr::n_distinct(ids)
+      return(tibble(Phenotype = pheno, Type = "continuous", Level = NA_character_,
+                    n_samples = sum(ok), n_infants = n_inf,
+                    Below_min = n_inf < min_total_n))
+    }
+    v  <- raw[ok]
+    lv <- if (is.factor(v)) levels(v) else sort(unique(as.character(v)))
+    map_dfr(lv, function(l) {
+      sel   <- !is.na(as.character(v)) & as.character(v) == l
+      n_inf <- dplyr::n_distinct(ids[sel])
+      tibble(Phenotype = pheno, Type = "categorical", Level = as.character(l),
+             n_samples = sum(sel), n_infants = n_inf,
+             Below_min = n_inf < min_level_n)
+    })
+  }) %>% arrange(Phenotype, desc(n_infants))
+}
+
+screen_phenotypes <- function(metadata, phenos, id_col = INFANT_ID,
+                              min_level_n        = MIN_LEVEL_INFANTS,
+                              min_total_n        = MIN_TOTAL_INFANTS,
+                              max_majority       = MAX_MAJORITY_SHARE,
+                              empty_level_action = EMPTY_LEVEL_ACTION) {
+  keep    <- character(0)
+  dropped <- list()
+  note <- function(pheno, rule, reason, detail = NA_character_) {
+    dropped[[length(dropped) + 1]] <<- tibble(
+      Phenotype = pheno, Rule = rule, Reason = reason, Detail = detail)
+    invisible(NULL)
+  }
+
+  for (pheno in phenos) {
+    if (!pheno %in% colnames(metadata)) { note(pheno, "-", "not in metadata"); next }
+
+    raw <- metadata[[pheno]]
+    ok  <- !is.na(raw)
+    ids <- metadata[[id_col]][ok]
+    n_inf_tot <- dplyr::n_distinct(ids)
+
+    if (!is_categorical_pheno(raw)) {
+      if (n_inf_tot < min_total_n) {
+        note(pheno, "group size", "too few infants",
+             sprintf("%d infants (< %d)", n_inf_tot, min_total_n)); next
+      }
+      if (length(unique(raw[ok])) < 2) { note(pheno, "variance", "no variation"); next }
+      keep <- c(keep, pheno); next
+    }
+
+    v <- raw[ok]
+    if (!is.factor(v)) v <- factor(v)
+
+    empty_levels <- setdiff(levels(v), unique(as.character(v)))
+    if (length(empty_levels) > 0) {
+      if (identical(empty_level_action, "drop_factor")) {
+        note(pheno, "group size", "level never observed",
+             paste(empty_levels, collapse = "; ")); next
+      }
+      v <- droplevels(v)   # also keeps the model matrix full rank
+      col <- metadata[[pheno]]
+      if (is.factor(col)) metadata[[pheno]] <- droplevels(col)
+    }
+
+    inf_per_level <- vapply(levels(v), function(l)
+      dplyr::n_distinct(ids[as.character(v) == l]), integer(1))
+    detail <- paste(sprintf("%s=%d infants", names(inf_per_level), inf_per_level),
+                    collapse = ", ")
+
+    if (length(inf_per_level) < 2) {
+      note(pheno, "group size", "only one level present", detail); next
+    }
+
+    # ---- RULE 1: >= min_level_n distinct infants in EVERY level -------------
+    if (any(inf_per_level < min_level_n)) {
+      note(pheno, "group size", sprintf("level with < %d infants", min_level_n),
+           detail); next
+    }
+
+    # ---- RULE 2: the largest level holds <= max_majority of infants ---------
+    if (max(inf_per_level) / n_inf_tot > max_majority) {
+      note(pheno, "variance",
+           sprintf("largest level %.1g%% of infants (> %.0f%%)",
+                   100 * max(inf_per_level) / n_inf_tot, 100 * max_majority),
+           detail); next
+    }
+
+    keep <- c(keep, pheno)
+  }
+
+  list(keep    = keep,
+       dropped = if (length(dropped)) bind_rows(dropped) else tibble(),
+       metadata = metadata)
+}
+
+pheno_counts_by_level <- build_infant_level_counts(metadata_infant, pheno_list)
+write.table(pheno_counts_by_level, "1G_pheno_level_counts.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+screen          <- screen_phenotypes(metadata_infant, pheno_list)
+metadata_infant <- screen$metadata
+pheno_list_kept <- screen$keep
+
+write.table(screen$dropped, "1G_pheno_screening_dropped.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+cat(sprintf("\nPhenotypes requested: %d   modelled: %d   excluded: %d\n",
+            length(pheno_list), length(pheno_list_kept), nrow(screen$dropped)))
+cat("\n--- Excluded, by rule ---\n")
+print_all(screen$dropped)
+if (nrow(screen$dropped) > 0) {
+  cat("\n--- Exclusion counts ---\n")
+  screen$dropped %>% dplyr::count(Rule, Reason) %>% arrange(desc(n)) %>% print_all()
+}
+
+cat("\n--- Placental phenotypes: infants per level ---\n")
+pheno_counts_by_level %>%
+  filter(Phenotype %in% c("mvm", "fh", "hypoplasia", "fvm_high_grade",
+                          "vue_high_grade", "ch_type", "ca_type")) %>%
+  print_all()
+cat("\n")
+
+if (length(pheno_list_kept) == 0)
+  stop("No phenotype passed the screen — check INFANT_ID and the thresholds.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 3 — mixed models
+# ══════════════════════════════════════════════════════════════════════════════
+shared <- intersect(rownames(metadata_infant), rownames(taxa_sp_filt_CLR))
+cat(sprintf("Samples shared with taxa table: %d (metadata %d, taxa %d)\n",
+            length(shared), nrow(metadata_infant), nrow(taxa_sp_filt_CLR)))
+metadata_model <- metadata_infant[shared, , drop = FALSE]
+
+# SAMPLE_ID, not INFANT_ID: the function keys row names on this argument.
+# The random intercept (1|MM_ID) is applied internally.
+taxa_sp_mixed_all <- mixed_models(metadata_model, SAMPLE_ID,
+                                  taxa_sp_filt_CLR[shared, , drop = FALSE],
+                                  pheno_list_kept)
+
+stopifnot(all(unique(taxa_sp_mixed_all$Pheno) %in% pheno_list_kept))
+
+# ── FDR over unique tests, not coefficient rows ───────────────────────────────
+# mixed_models() returns one row per COEFFICIENT but assigns the same term-level
+# LRT p-value to each. A multi-level factor such as ca_type therefore enters the
+# BH correction once per contrast, inflating the denominator beyond the number
+# of tests actually performed. Adjust over unique (Bug, Pheno) tests and map
+# back. FDR_orig keeps the original values for comparison.
+taxa_sp_mixed_all <- taxa_sp_mixed_all %>%
+  group_by(Bug, Pheno) %>%
+  mutate(P_term = dplyr::first(P)) %>%
+  ungroup() %>%
+  mutate(FDR_orig = FDR)
+
+fdr_lookup <- taxa_sp_mixed_all %>%
+  dplyr::distinct(Bug, Pheno, P_term) %>%
+  mutate(FDR = p.adjust(P_term, method = "BH"))
+
+taxa_sp_mixed_all <- taxa_sp_mixed_all %>%
+  dplyr::select(-FDR) %>%
+  dplyr::left_join(fdr_lookup, by = c("Bug", "Pheno", "P_term"))
+
+cat(sprintf("\nCoefficient rows: %d   unique (taxon, phenotype) tests: %d\n",
+            nrow(taxa_sp_mixed_all), nrow(fdr_lookup)))
+cat(sprintf("Hits at FDR < 0.05  —  recomputed: %d   original: %d\n",
+            sum(taxa_sp_mixed_all$FDR < 0.05, na.rm = TRUE),
+            sum(taxa_sp_mixed_all$FDR_orig < 0.05, na.rm = TRUE)))
+
+write.table(taxa_sp_mixed_all, "taxa_sp_mixed_all_pl_subtypes.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+cat(sprintf("✓ Models run for %d phenotypes; every categorical level has >= %d infants\n\n",
+            length(pheno_list_kept), MIN_LEVEL_INFANTS))
+
+# ══════════════════════════════════════════════════════════════════════════════
+# STEP 4 — Figure 1G
+# ══════════════════════════════════════════════════════════════════════════════
+taxa_sp_mixed <- read.delim("taxa_sp_mixed_all_pl_subtypes.txt")
+
+# Multi-level factors yield one coefficient row per non-reference level, all
+# sharing the same Pheno. Folding the level into the phenotype identity
+# ("ca_type__maternal response only") keeps each contrast on its own row so the
+# dcast() pivot never collides — otherwise dcast falls back to counting rows and
+# the heatmap comes out as a near-uniform block.
+# substring() is vectorised element-wise over `first`; sub()'s `pattern` is not.
+subtype_phenos <- c("ch_type", "ca_type", "fvm_type", "vue_type")
+
+taxa_sp_mixed <- taxa_sp_mixed %>%
+  dplyr::select(Feature, Bug, Pheno, t.value, P, FDR) %>%
+  dplyr::rename(bac = Bug, phenotype = Pheno) %>%
+  mutate(level = ifelse(phenotype %in% subtype_phenos,
+                        trimws(substring(Feature, nchar(phenotype) + 1)),
+                        NA_character_)) %>%
+  filter(is.na(level) | level != "none") %>%
+  mutate(phenotype = ifelse(!is.na(level), paste0(phenotype, "__", level), phenotype)) %>%
+  dplyr::select(-Feature, -level)
+
+taxa_sp_mixed_filtered <- taxa_sp_mixed %>% filter(FDR < 0.05)
+
+pheno_counts <- taxa_sp_mixed_filtered %>% count(phenotype) %>% arrange(desc(n))
+
+# Phenotypes excluded from the figure by hand. sip is already removed by the
+# infant-count screen; probiotic_sample duplicates probiotics; maternal_viral
+# is not a column in this export, so that entry has never matched anything.
+MANUAL_EXCLUSIONS <- c("probiotic_sample", "maternal_viral", "sip")
+pheno_counts <- pheno_counts %>% filter(!phenotype %in% MANUAL_EXCLUSIONS)
+
+cat("\n--- Significant taxa per phenotype (FDR < 0.05), full ranking ---\n")
+pheno_counts %>%
+  mutate(label = clean_phenotype_name(phenotype)) %>%
+  as.data.frame() %>% print(row.names = FALSE)
+
+N_TOP     <- 10
+top_pheno <- pheno_counts %>% slice_max(n, n = N_TOP, with_ties = FALSE)
+
+if (nrow(pheno_counts) > N_TOP) {
+  cat(sprintf("\nCut at %d of %d phenotypes: last included n = %d, first excluded n = %d\n",
+              N_TOP, nrow(pheno_counts), min(top_pheno$n), pheno_counts$n[N_TOP + 1]))
+} else {
+  cat(sprintf("\nOnly %d phenotypes have any FDR < 0.05 association — all are shown; the top-%d cut never binds.\n",
+              nrow(pheno_counts), N_TOP))
+}
+
+top_phenotypes    <- unique(top_pheno$phenotype)
+included_bacteria <- unique(taxa_sp_mixed_filtered$bac)
+
+taxa_sp_filtered <- taxa_sp_mixed %>%
+  filter(bac %in% included_bacteria, phenotype %in% top_phenotypes)
+
+# ── Wide matrices ─────────────────────────────────────────────────────────────
+wide_data <- dcast(taxa_sp_filtered, phenotype ~ bac, value.var = 't.value')
+row.names(wide_data) <- wide_data$phenotype
+wide_data$phenotype  <- NULL
+wide_data[is.na(wide_data)] <- 0
+
+significance_matrix <- dcast(taxa_sp_filtered, phenotype ~ bac, value.var = 'FDR')
+row.names(significance_matrix) <- significance_matrix$phenotype
+significance_matrix$phenotype  <- NULL
+significance_matrix <- ifelse(!is.na(significance_matrix) & significance_matrix < 0.05,
+                              '*', '')
+
+heatmap_data <- as.matrix(wide_data)
+
+# Keep the two matrices in lockstep so the asterisks cannot drift.
+significance_matrix <- significance_matrix[rownames(heatmap_data),
+                                           colnames(heatmap_data), drop = FALSE]
+
+# ── Apply labels, refusing to plot a raw variable name ────────────────────────
+raw_rows  <- rownames(heatmap_data)
+new_names <- clean_phenotype_name(raw_rows)
+
+unlabelled <- raw_rows[!(raw_rows %in% names(PHENOTYPE_LABELS)) &
+                         !grepl("__", raw_rows, fixed = TRUE)]
+if (length(unlabelled) > 0)
+  warning("No label defined for: ", paste(unlabelled, collapse = ", "),
+          " — add them to PHENOTYPE_LABELS.", call. = FALSE)
+
+if (anyDuplicated(new_names))
+  stop("Two phenotypes resolve to the same label: ",
+       paste(unique(new_names[duplicated(new_names)]), collapse = ", "))
+
+rownames(heatmap_data)        <- new_names
+rownames(significance_matrix) <- new_names
+
+cat("\n--- Row labels on the figure ---\n")
+print(data.frame(variable = raw_rows, label = new_names), row.names = FALSE)
+
+# ── Draw ──────────────────────────────────────────────────────────────────────
+custom_colors <- colorRampPalette(c("blue", "white", "red"))(50)
+max_abs_value <- max(abs(heatmap_data), na.rm = TRUE)
+breaks_list   <- seq(-max_abs_value, max_abs_value, length.out = 50)
+
+pheatmap(
+  heatmap_data,
+  cluster_rows             = FALSE,
+  cluster_cols             = TRUE,
+  clustering_distance_rows = 'euclidean',
+  clustering_method        = 'complete',
+  color                    = custom_colors,
+  breaks                   = breaks_list,
+  display_numbers          = significance_matrix,
+  number_color             = "black",
+  fontsize_number          = 14,
+  main                     = '',
+  angle_col                = 90,
+  fontsize_col             = 9,
+  fontsize_row             = 10,
+  cellheight               = 15,
+  cellwidth                = 15,
+  filename                 = "1G_phenotype_heatmap_subtypes.pdf"
+)
+
+cat("✓ Saved: 1G_phenotype_heatmap_subtypes.pdf\n")
+
+```
+
+```{r}
+#Plot 1G only
+
+PHENOTYPE_LABELS <- c(
+  # ── maternal / obstetric ──────────────────────────────────────────────────
+  "prolonged_rupt"    = "Prolonged Rupture of Membranes",
+  "multiple"          = "Multiple Pregnancy",
+  "delivery_md"       = "Delivery Mode",
+  "maternal_atb"      = "Maternal Antibiotics",
+  "maternal_ab48"     = "Maternal Antibiotics (48h)",
+  "mother_st"         = "Antenatal Corticosteroids (any)",
+  "mother_st_com"     = "Antenatal Corticosteroids (complete)",
+  "pe_hellp"          = "Pre-eclampsia / HELLP",
+  "maternal_infect"   = "Maternal Infection",
+  "mother_b_hem"      = "Maternal Group B Streptococcus",
+  "primiparous"       = "Primiparous",
+  "parities_nb"       = "Parity",
+
+  # ── infant characteristics ────────────────────────────────────────────────
+  "ga_exact"          = "Gestational Age",
+  "bw"                = "Birth Weight",
+  "sex"               = "Sex",
+  "apgar_1"           = "Apgar Score (1 min)",
+  "apgar_5"           = "Apgar Score (5 min)",
+  "SGA"               = "Small for Gestational Age",
+  "LGA"               = "Large for Gestational Age",
+  "FGR"               = "Fetal Growth Restriction",
+  "admissiontime"     = "Admission Duration",
+  "week"              = "Postnatal Week",
+  "Postnatal_Age"     = "Postnatal Age",
+
+  # ── treatment / exposure ──────────────────────────────────────────────────
+  "ab48"              = "Antibiotics in First 48h",
+  "abtx"              = "Antibiotic Treatment",
+  "antibiotic_sample" = "Days of Antibiotic Use",
+  "antibiotic"        = "Days of Antibiotic Use",
+  "probiotics"        = "Probiotics",
+  "probiotic_sample"  = "Days of Probiotic Use",
+  "probiotics_sample" = "Days of Probiotic Use",
+  "tpn_days"          = "Duration of Parenteral Nutrition",
+  "TFEF"              = "Time to Full Enteral Feeds",
+  "TFEF_B"            = "Time to Full Enteral Feeds (dichotomised)",
+  "mmpercentage"      = "Mother's Own Milk (%)",
+  "surgery"           = "Surgery",
+  "surgery_nec"       = "Surgery for NEC",
+  "rbc_tx_48"         = "Red Cell Transfusion (48h)",
+
+  # ── outcomes / morbidity ──────────────────────────────────────────────────
+  "nec"               = "Necrotizing Enterocolitis",
+  "nec_bell"          = "NEC (Bell Stage)",
+  "sip"               = "Spontaneous Intestinal Perforation",
+  "sepsis"            = "Sepsis",
+  "sepsis_culture"    = "Culture-proven Sepsis",
+  "sepsis_crp"        = "Sepsis (CRP-defined)",
+  "pda"               = "Patent Ductus Arteriosus",
+  "pda_sign"          = "Haemodynamically Significant PDA",
+  "ivh"               = "Intraventricular Haemorrhage",
+  "mortality"         = "Mortality",
+
+  # ── placental pathology ───────────────────────────────────────────────────
+  "mvm"               = "Maternal Vascular Malperfusion",
+  "fvm"               = "Fetal Vascular Malperfusion",
+  "fh"                = "Increased Nucleated Fetal Erythrocytes",
+  "hypoplasia"        = "Placental Hypoplasia (weight <p10)",
+  "placenta_ab"       = "Any Placental Abnormality",
+  "placental_weight"  = "Placental Weight",
+  "fvm_high_grade"    = "Fetal Vascular Malperfusion (High Grade)",
+  "vue_high_grade"    = "Villitis of Unknown Aetiology (High Grade)",
+  "fvm_type"          = "Fetal Vascular Malperfusion",
+  "ch_type"           = "Chorangiosis",
+  "ca_type"           = "Chorioamnionitis",
+  "vue_type"          = "Villitis of Unknown Aetiology"
+)
+
+# Pretty forms for subtype levels, used when a phenotype is written as
+# "<base>__<level>" by the contrast-splitting step above.
+LEVEL_LABELS <- c(
+  "low grade"                   = "Low Grade",
+  "high grade"                  = "High Grade",
+  "segmental"                   = "Segmental",
+  "diffuse"                     = "Diffuse",
+  "maternal response only"      = "Maternal Response Only",
+  "maternal and fetal response" = "Maternal and Fetal Response"
+)
+
+# ── Resolver ──────────────────────────────────────────────────────────────────
+# Handles three cases: an exact match; a "<base>__<level>" contrast, which is
+# assembled from the base label and the level label; and anything unrecognised,
+# which is title-cased AND reported, rather than reaching the figure unnoticed.
+clean_phenotype_name <- function(name) {
+  vapply(name, function(nm) {
+    if (nm %in% names(PHENOTYPE_LABELS)) return(unname(PHENOTYPE_LABELS[nm]))
+
+    if (grepl("__", nm, fixed = TRUE)) {
+      parts <- strsplit(nm, "__", fixed = TRUE)[[1]]
+      base  <- parts[1]
+      lvl   <- paste(parts[-1], collapse = "__")
+      base_lab <- if (base %in% names(PHENOTYPE_LABELS))
+        unname(PHENOTYPE_LABELS[base]) else tools::toTitleCase(gsub("_", " ", base))
+      lvl_lab  <- if (lvl %in% names(LEVEL_LABELS))
+        unname(LEVEL_LABELS[lvl]) else tools::toTitleCase(lvl)
+      return(sprintf("%s (%s)", base_lab, lvl_lab))
+    }
+
+    stripped <- gsub("_sample$", "", nm)
+    if (stripped %in% names(PHENOTYPE_LABELS))
+      return(unname(PHENOTYPE_LABELS[stripped]))
+
+    tools::toTitleCase(gsub("_", " ", nm))
+  }, FUN.VALUE = character(1), USE.NAMES = FALSE)
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Figure 1G
+# ══════════════════════════════════════════════════════════════════════════════
+taxa_sp_mixed <- read.delim("taxa_sp_mixed_all_pl_subtypes.txt")
+
+# Multi-level factors yield one coefficient row per non-reference level, all
+# sharing the same Pheno. Folding the level into the phenotype identity
+# ("ca_type__maternal response only") keeps each contrast on its own row so the
+# dcast() pivot never collides. substring() is vectorised element-wise over
+# `first`, so each row strips its own prefix.
+subtype_phenos <- c("ch_type", "ca_type", "fvm_type", "vue_type")
+
+taxa_sp_mixed <- taxa_sp_mixed %>%
+  dplyr::select(Feature, Bug, Pheno, t.value, P, FDR) %>%
+  dplyr::rename(bac = Bug, phenotype = Pheno) %>%
+  mutate(
+    level = ifelse(phenotype %in% subtype_phenos,
+                   trimws(substring(Feature, nchar(phenotype) + 1)),
+                   NA_character_)
+  ) %>%
+  filter(is.na(level) | level != "none") %>%
+  mutate(phenotype = ifelse(!is.na(level), paste0(phenotype, "__", level), phenotype)) %>%
+  dplyr::select(-Feature, -level)
+
+taxa_sp_mixed_filtered <- taxa_sp_mixed %>% filter(FDR < 0.05)
+
+pheno_counts <- taxa_sp_mixed_filtered %>%
+  dplyr::count(phenotype) %>%
+  arrange(desc(n))
+
+# Phenotypes excluded from the figure by hand. sip is already removed by the
+# infant-count screen; probiotic_sample duplicates probiotics; maternal_viral
+# is not a column in this export, so that entry has never matched anything.
+MANUAL_EXCLUSIONS <- c("probiotic_sample", "maternal_viral", "sip")
+pheno_counts <- pheno_counts %>% filter(!phenotype %in% MANUAL_EXCLUSIONS)
+
+# Report the full ranking, so the inclusion cut is visible rather than implied.
+cat("\n--- Significant taxa per phenotype (FDR < 0.05), full ranking ---\n")
+pheno_counts %>%
+  mutate(label = clean_phenotype_name(phenotype)) %>%
+  as.data.frame() %>%
+  print(row.names = FALSE)
+
+N_TOP <- 10
+# with_ties = TRUE: when phenotypes tie on n at the cut-off, every tied
+# phenotype is kept rather than an arbitrary subset chosen by sort order.
+# In the current data four phenotypes tie at n = 5 for the last three slots
+# (antibiotic treatment, maternal GBS, birth weight, admission duration), so
+# the figure shows 11 rows rather than 10. Dropping one of four equally
+# supported variables on sort order alone is not defensible in a figure.
+top_pheno <- pheno_counts %>% slice_max(n, n = N_TOP, with_ties = TRUE)
+
+cutoff_n <- min(top_pheno$n)
+n_tied   <- sum(pheno_counts$n == cutoff_n)
+excluded <- pheno_counts %>% filter(!phenotype %in% top_pheno$phenotype)
+
+cat(sprintf("\nPhenotypes with >= 1 association at FDR < 0.05: %d\n", nrow(pheno_counts)))
+cat(sprintf("Shown in the figure: %d (top %d requested; %d phenotype(s) tied at n = %d, all kept)\n",
+            nrow(top_pheno), N_TOP, n_tied, cutoff_n))
+if (nrow(excluded) > 0) {
+  cat(sprintf("Highest excluded: %s (n = %d)\n", excluded$phenotype[1], excluded$n[1]))
+} else {
+  cat("Nothing excluded — every phenotype with an association is shown.\n")
+}
+
+top_phenotypes    <- unique(top_pheno$phenotype)
+included_bacteria <- unique(taxa_sp_mixed_filtered$bac)
+
+taxa_sp_filtered <- taxa_sp_mixed %>%
+  filter(bac %in% included_bacteria, phenotype %in% top_phenotypes)
+
+# ── Wide matrices ─────────────────────────────────────────────────────────────
+wide_data <- dcast(taxa_sp_filtered, phenotype ~ bac, value.var = 't.value')
+row.names(wide_data) <- wide_data$phenotype
+wide_data$phenotype  <- NULL
+wide_data[is.na(wide_data)] <- 0
+
+significance_matrix <- dcast(taxa_sp_filtered, phenotype ~ bac, value.var = 'FDR')
+row.names(significance_matrix) <- significance_matrix$phenotype
+significance_matrix$phenotype  <- NULL
+significance_matrix <- ifelse(!is.na(significance_matrix) & significance_matrix < 0.05,
+                              '*', '')
+
+heatmap_data <- as.matrix(wide_data)
+
+# Keep the two matrices in the same row/column order: pheatmap places the
+# asterisks by position.
+significance_matrix <- significance_matrix[rownames(heatmap_data),
+                                           colnames(heatmap_data), drop = FALSE]
+
+# ── Apply labels, and refuse to plot a raw variable name ──────────────────────
+raw_rows  <- rownames(heatmap_data)
+new_names <- clean_phenotype_name(raw_rows)
+
+unlabelled <- raw_rows[
+  !(raw_rows %in% names(PHENOTYPE_LABELS)) & !grepl("__", raw_rows, fixed = TRUE)
+]
+if (length(unlabelled) > 0)
+  warning("No label defined for: ", paste(unlabelled, collapse = ", "),
+          " — add them to PHENOTYPE_LABELS.", call. = FALSE)
+
+if (anyDuplicated(new_names))
+  stop("Two phenotypes resolve to the same label: ",
+       paste(unique(new_names[duplicated(new_names)]), collapse = ", "))
+
+rownames(heatmap_data)        <- new_names
+rownames(significance_matrix) <- new_names
+
+cat("\n--- Row labels on the figure ---\n")
+print(data.frame(variable = raw_rows, label = new_names), row.names = FALSE)
+
+# ── Draw ──────────────────────────────────────────────────────────────────────
+library(RColorBrewer)
+custom_colors <- colorRampPalette(c("blue", "white", "red"))(50)
+max_abs_value <- max(abs(heatmap_data), na.rm = TRUE)
+breaks_list   <- seq(-max_abs_value, max_abs_value, length.out = 50)
+
+pheatmap(
+  heatmap_data,
+  cluster_rows             = FALSE,
+  cluster_cols             = TRUE,
+  clustering_distance_rows = 'euclidean',
+  clustering_method        = 'complete',
+  color                    = custom_colors,
+  breaks                   = breaks_list,
+  display_numbers          = significance_matrix,
+  number_color             = "black",
+  fontsize_number          = 14,
+  main                     = '',
+  angle_col                = 90,
+  fontsize_col             = 9,
+  fontsize_row             = 10,
+  cellheight               = 15,
+  cellwidth                = 15,
+  filename                 = "1G_phenotype_heatmap_subtypes.pdf"
+)
+
+cat("✓ Saved: 1G_phenotype_heatmap_subtypes.pdf\n")
+
+# ── LEGEND NUMBERS: Fig. 1g ───────────────────────────────────────────────────
+# Needs metadata_model and fdr_lookup from the full Figure 1G chunk above.
+legend_out("Fig 1g — samples / infants entering the mixed models",
+           metadata_model %>% mutate(MM_ID = as.numeric(MM_ID)) %>% n_si())
+legend_out("Fig 1g — BH family",
+           sprintf("taxa tested: %d | phenotypes tested: %d | unique taxon x phenotype tests: %d",
+                   dplyr::n_distinct(fdr_lookup$Bug), dplyr::n_distinct(fdr_lookup$Pheno),
+                   nrow(fdr_lookup)))
+legend_out("Fig 1g — shown",
+           sprintf("phenotype rows: %d (top %d by number of FDR<0.05 taxa, ties kept; manually excluded: %s) | species columns: %d (any FDR<0.05 association)",
+                   nrow(heatmap_data), N_TOP, paste(MANUAL_EXCLUSIONS, collapse = ", "),
+                   ncol(heatmap_data)))
+covs_1g <- c("Clean_reads_P1", "DNA_conc", "Postnatal_Age")
+legend_out("Fig 1g — complete cases per shown phenotype (samples; infants)",
+           purrr::map_dfr(unique(sub("__.*$", "", top_phenotypes)), function(ph) {
+             ok <- stats::complete.cases(metadata_model[, c(ph, covs_1g), drop = FALSE])
+             tibble(Phenotype = clean_phenotype_name(ph),
+                    n_samples = sum(ok),
+                    n_infants = dplyr::n_distinct(metadata_model$MM_ID[ok]))
+           }))
+
+```
+
+```{r}
+#VIF
+
+META_FILE <- "meta_with_placental_subtypes.txt"
+SAMPLE_ID <- "ID"
+INFANT_ID <- "MM_ID"
+COVARIATES <- c("Clean_reads_P1", "DNA_conc", "Postnatal_Age")
+
+if (!exists("top_pheno")) stop("Run the Figure 1G block first — `top_pheno` is missing.")
+
+heatmap_phenos <- unique(sub("__.*$", "", top_pheno$phenotype))
+cat("Variables shown in Figure 1G:\n  ", paste(heatmap_phenos, collapse = ", "), "\n\n")
+
+# ── Rebuild the modelling table ───────────────────────────────────────────────
+meta_all <- read.table(META_FILE, header = TRUE, quote = "\"",
+                       na.strings = c("NA", ""), stringsAsFactors = FALSE,
+                       comment.char = "")
+meta <- meta_all[meta_all$SampleType == "infant", , drop = FALSE]
+rownames(meta) <- meta[[SAMPLE_ID]]
+
+# Same reference levels as the models, so factor coding matches.
+subtype_levels <- list(
+  fvm_type = c("none", "low grade", "high grade"),
+  ch_type  = c("none", "segmental", "diffuse"),
+  ca_type  = c("none", "maternal response only", "maternal and fetal response"),
+  vue_type = c("none", "low grade", "high grade")
+)
+for (v in names(subtype_levels))
+  if (v %in% colnames(meta))
+    meta[[v]] <- factor(meta[[v]], levels = subtype_levels[[v]])
+
+meta$fvm_high_grade <- ifelse(is.na(meta$fvm_type), NA_real_,
+                              as.numeric(as.character(meta$fvm_type) == "high grade"))
+meta$vue_high_grade <- ifelse(is.na(meta$vue_type), NA_real_,
+                              as.numeric(as.character(meta$vue_type) == "high grade"))
+
+missing <- setdiff(c(heatmap_phenos, COVARIATES), colnames(meta))
+if (length(missing) > 0) stop("Not in metadata: ", paste(missing, collapse = ", "))
+
+as_modelled <- function(x) {
+  if (is.factor(x)) return(droplevels(x))
+  u <- unique(x[!is.na(x)])
+  if (is.numeric(x)) return(x)
+  if (length(u) <= 2) return(as.numeric(factor(x)) - 1)
+  factor(x)
+}
+
+vif_data <- meta[, c(INFANT_ID, heatmap_phenos, COVARIATES), drop = FALSE]
+for (v in c(heatmap_phenos, COVARIATES)) vif_data[[v]] <- as_modelled(vif_data[[v]])
+
+before_s <- nrow(vif_data)
+before_i <- dplyr::n_distinct(vif_data[[INFANT_ID]])
+vif_data <- vif_data[stats::complete.cases(vif_data), , drop = FALSE]
+
+cat(sprintf("Complete cases: %d of %d samples (%d of %d infants)\n",
+            nrow(vif_data), before_s,
+            dplyr::n_distinct(vif_data[[INFANT_ID]]), before_i))
+if (nrow(vif_data) < 0.5 * before_s)
+  warning("More than half the samples were dropped by complete-case filtering — ",
+          "the VIFs describe a subset, and that should be stated in the methods.",
+          call. = FALSE)
+
+keep_var <- vapply(vif_data[, c(heatmap_phenos, COVARIATES), drop = FALSE],
+                   function(x) length(unique(x[!is.na(x)])) > 1, logical(1))
+if (any(!keep_var)) {
+  cat("Dropped (no variation in the complete-case subset): ",
+      paste(names(keep_var)[!keep_var], collapse = ", "), "\n")
+}
+vif_vars <- names(keep_var)[keep_var]
+
+run_vif <- function(dat, vars, label) {
+  set.seed(1)
+  dat$.y <- stats::rnorm(nrow(dat))
+  form <- stats::as.formula(paste(".y ~", paste(sprintf("`%s`", vars), collapse = " + ")))
+  fit  <- stats::lm(form, data = dat)
+
+  if (any(is.na(stats::coef(fit))))
+    warning(label, ": aliased (perfectly collinear) terms -> ",
+            paste(names(stats::coef(fit))[is.na(stats::coef(fit))], collapse = ", "),
+            call. = FALSE)
+
+  v <- car::vif(fit)
+
+  out <- if (is.matrix(v)) {
+    tibble::tibble(Variable = rownames(v),
+                   Df       = as.integer(v[, "Df"]),
+                   GVIF     = round(as.numeric(v[, "GVIF"]), 3),
+                   VIF_comparable = round(as.numeric(v[, ncol(v)])^2, 3))
+  } else {
+    tibble::tibble(Variable = names(v), Df = 1L,
+                   GVIF = round(as.numeric(v), 3),
+                   VIF_comparable = round(as.numeric(v), 3))
+  }
+  out <- out[order(-out$VIF_comparable), ]
+
+  cat(sprintf("\n--- VIF: %s (n = %d) ---\n", label, nrow(dat)))
+  print(as.data.frame(out), row.names = FALSE)
+  cat(sprintf("Maximum: %.2f (%s)\n", max(out$VIF_comparable),
+              out$Variable[which.max(out$VIF_comparable)]))
+  out$Scope <- label
+  out
+}
+
+vif_sample <- run_vif(vif_data, vif_vars, "per sample")
+
+vif_infant_data <- vif_data %>%
+  group_by(.data[[INFANT_ID]]) %>%
+  summarise(across(all_of(vif_vars),
+                   ~ if (is.numeric(.x)) mean(.x, na.rm = TRUE) else dplyr::first(.x)),
+            .groups = "drop") %>%
+  as.data.frame()
+
+keep_var2 <- vapply(vif_infant_data[, vif_vars, drop = FALSE],
+                    function(x) length(unique(x[!is.na(x)])) > 1, logical(1))
+vif_infant <- run_vif(vif_infant_data, names(keep_var2)[keep_var2], "per infant")
+
+vif_per_model <- purrr::map_dfr(intersect(heatmap_phenos, vif_vars), function(ph) {
+  vars <- c(ph, intersect(COVARIATES, vif_vars))
+  dat  <- vif_data[stats::complete.cases(vif_data[, vars, drop = FALSE]), , drop = FALSE]
+  if (length(unique(dat[[ph]])) < 2) return(NULL)
+  set.seed(1)
+  dat$.y <- stats::rnorm(nrow(dat))
+  fit <- stats::lm(stats::as.formula(paste(".y ~", paste(sprintf("`%s`", vars), collapse = " + "))),
+                   data = dat)
+  v <- car::vif(fit)
+  val <- if (is.matrix(v)) as.numeric(v[, ncol(v)])^2 else as.numeric(v)
+  tibble::tibble(Model = ph, Variable = if (is.matrix(v)) rownames(v) else names(v),
+                 VIF_comparable = round(val, 3))
+})
+
+cat("\n--- VIF within each fitted model (phenotype + covariates) ---\n")
+vif_per_model %>%
+  filter(Variable %in% heatmap_phenos) %>%
+  arrange(desc(VIF_comparable)) %>%
+  as.data.frame() %>% print(row.names = FALSE)
+
+vif_table <- dplyr::bind_rows(
+  vif_sample, vif_infant,
+  mutate(vif_per_model, Df = 1L, GVIF = VIF_comparable,
+         Scope = paste("within model:", Model)) %>% dplyr::select(-Model)
+)
+write.table(vif_table, "1G_VIF.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+cat(sprintf("\nMax VIF — all phenotypes jointly, per sample: %.2f | per infant: %.2f | within fitted models: %.2f\n",
+            max(vif_sample$VIF_comparable), max(vif_infant$VIF_comparable),
+            max(vif_per_model$VIF_comparable)))
+cat("✓ Saved: 1G_VIF.txt\n")
+
+num_vars <- vif_vars[vapply(vif_data[, vif_vars, drop = FALSE], is.numeric, logical(1))]
+if (length(num_vars) > 1) {
+  cm <- stats::cor(vif_data[, num_vars, drop = FALSE], use = "pairwise.complete.obs")
+  cm[upper.tri(cm, diag = TRUE)] <- NA
+  pairs <- which(!is.na(cm), arr.ind = TRUE)
+  pw <- tibble::tibble(V1 = rownames(cm)[pairs[, 1]],
+                       V2 = colnames(cm)[pairs[, 2]],
+                       r  = round(cm[pairs], 3))
+  pw <- pw[order(-abs(pw$r)), ]
+  cat("\n--- Largest pairwise correlations (numeric/binary variables) ---\n")
+  print(as.data.frame(head(pw, 10)), row.names = FALSE)
+  write.table(pw, "1G_pairwise_correlations.txt",
+              sep = "\t", row.names = FALSE, quote = FALSE)
+}
+
+```
+

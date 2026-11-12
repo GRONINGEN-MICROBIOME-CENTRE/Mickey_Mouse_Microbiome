@@ -1,0 +1,384 @@
+---
+title: "Supplementary Figure 2"
+output: html_notebook
+---
+
+```{r setup, include = FALSE}
+# DATA_DIR: folder holding the input data files (see README).
+# CODE_DIR: root of this repository, one level above this notebook.
+DATA_DIR <- "/Users/daphneklerk/Desktop/R things"
+CODE_DIR <- normalizePath("..")
+knitr::opts_knit$set(root.dir = normalizePath(DATA_DIR))
+```
+
+```{r}
+library(tidyverse)
+library(vegan)
+library(lme4)
+library(lmerTest)
+library(viridis)
+library(ggExtra)
+library(dplyr)
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# LEGEND NUMBERS — helper
+# ══════════════════════════════════════════════════════════════════════════════
+LEGEND_FILE <- "SuppFigure2_legend_numbers.txt"
+cat("Supplementary Figure 2 - legend numbers\nGenerated: ", format(Sys.time()), "\n",
+    file = LEGEND_FILE, sep = "")
+legend_out <- function(title, x = NULL) {
+  body <- if (is.null(x)) character(0) else if (is.character(x)) x
+          else utils::capture.output(print(as.data.frame(x), row.names = FALSE))
+  txt <- c("", paste0("=== ", title, " ==="), body)
+  cat(txt, sep = "\n"); cat(txt, sep = "\n", file = LEGEND_FILE, append = TRUE)
+  invisible(NULL)
+}
+n_si <- function(df, ..., id = "MM_ID") {
+  df %>% dplyr::group_by(...) %>%
+    dplyr::summarise(n_samples = dplyr::n(),
+                     n_infants = dplyr::n_distinct(.data[[id]]), .groups = "drop")
+}
+lmm_term <- function(data, outcome, term,
+                     covs = c("Postnatal_Age", "Clean_reads_P1", "DNA_conc")) {
+  d <- data[stats::complete.cases(data[, c(outcome, term, covs, "MM_ID")]), , drop = FALSE]
+  for (v in covs) d[[paste0(v, "_z")]] <- as.numeric(scale(as.numeric(d[[v]])))
+  rhs0 <- paste(paste0(covs, "_z"), collapse = " + ")
+  m0 <- lmer(stats::as.formula(paste(outcome, "~", rhs0, "+ (1|MM_ID)")), data = d, REML = FALSE)
+  m1 <- lmer(stats::as.formula(paste(outcome, "~", rhs0, "+", term, "+ (1|MM_ID)")), data = d, REML = FALSE)
+  cf <- summary(m1)$coefficients
+  r  <- grep(paste0("^", term), rownames(cf))[1]
+  sprintf("n = %d samples / %d infants | effect = %.3f (SE %.3f) | LRT p = %.3g",
+          nrow(d), dplyr::n_distinct(d$MM_ID), cf[r, 1], cf[r, 2],
+          stats::anova(m1, m0)[["Pr(>Chisq)"]][2])
+}
+# Species names: underscores out, genus abbreviated, for italic axis labels.
+pretty_species <- function(x) {
+  x <- gsub("_", " ", x)
+  x <- sub(" sp ", " sp. ", x)
+  ifelse(grepl("^[A-Z][a-z]+ sp\\.", x), x, sub("^([A-Z])[a-z]+ ", "\\1. ", x))
+}
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA — infant samples, probiotic species REMOVED (as in Figures 2 and 3)
+# ══════════════════════════════════════════════════════════════════════════════
+metadata     <- read.delim("metadata_cleaned_april.txt")
+taxa_cleaned <- read.delim("taxa_cleaned_jan.txt")
+row.names(taxa_cleaned) <- taxa_cleaned$ID; taxa_cleaned$ID <- NULL
+row.names(metadata) <- metadata$ID
+
+metadata_infant <- metadata[grep("^B", rownames(metadata)), ]
+taxa_infant     <- taxa_cleaned[grep("^B", rownames(taxa_cleaned)), ]
+
+factor_vars <- c("prolonged_rupt", "surgery", "ab48", "multiple", "delivery_md",
+                 "maternal_atb", "mother_st_com", "placenta_ab", "pe_hellp",
+                 "maternal_infect", "mother_b_hem", "nec", "sex", "sip",
+                 "sepsis_culture", "pda_sign", "mortality", "pda", "probiotics",
+                 "SGA", "LGA", "FGR", "ivh", "abtx")
+numeric_vars <- c("mmpercentage", "probiotic_sample", "apgar_1", "apgar_5",
+                  "antibiotic_sample", "ga_exact", "bw", "admissiontime", "tpn_days",
+                  "TFEF_B", "TFEF", "DNA_conc", "Clean_reads_P1", "week",
+                  "Postnatal_Age", "MM_ID")
+metadata_infant[factor_vars]  <- lapply(metadata_infant[factor_vars], as.factor)
+metadata_infant[numeric_vars] <- lapply(metadata_infant[numeric_vars], as.numeric)
+
+taxa <- taxa_infant[row.names(taxa_infant) %in% rownames(metadata_infant), ]
+taxa_sp <- taxa[, grep("s__", colnames(taxa))]
+taxa_sp <- taxa_sp[, -grep("t__", colnames(taxa_sp))]
+colnames(taxa_sp) <- gsub(".*s__", "", colnames(taxa_sp))
+
+PROBIOTIC_SPECIES <- c("Bifidobacterium_longum", "Bifidobacterium_animalis",
+                       "Streptococcus_thermophilus")
+legend_out("Probiotic species removed before diversity and composition analyses",
+           data.frame(species = PROBIOTIC_SPECIES,
+                      present_in_table = PROBIOTIC_SPECIES %in% colnames(taxa_sp)))
+taxa_sp <- taxa_sp[, !colnames(taxa_sp) %in% PROBIOTIC_SPECIES, drop = FALSE]
+taxa_sp <- taxa_sp %>% mutate(across(everything(), ~ as.numeric(.)))
+
+richness <- plyr::ddply(taxa_sp, ~ rownames(taxa_sp),
+                        function(x) data.frame(RICHNESS = sum(x[-1] > 0, na.rm = TRUE)))
+row.names(richness) <- richness$`rownames(taxa_sp)`; richness$`rownames(taxa_sp)` <- NULL
+my_alpha_diversity <- data.frame(Shannon = diversity(taxa_sp, index = "shannon"),
+                                 Simpson = diversity(taxa_sp, index = "simpson"))
+my_alpha_diversity <- merge(my_alpha_diversity, richness, by = "row.names")
+row.names(my_alpha_diversity) <- my_alpha_diversity$Row.names
+my_alpha_diversity$Row.names <- NULL
+
+phenos_imputed_div <- merge(my_alpha_diversity, metadata_infant, by = "row.names")
+row.names(phenos_imputed_div) <- phenos_imputed_div$Row.names
+phenos_imputed_div$Row.names <- NULL
+phenos_imputed_div$week <- factor(as.character(phenos_imputed_div$week),
+                                  levels = as.character(1:8), labels = paste0("W", 1:8))
+phenos_imputed_div$probiotics <- factor(as.character(phenos_imputed_div$probiotics),
+                                        levels = c("0", "1"), labels = c("No", "Yes"))
+
+legend_out("Supp 2 — analysed infant samples", phenos_imputed_div %>% n_si())
+legend_out("Supp 2 — samples / infants by probiotic exposure at sampling",
+           phenos_imputed_div %>% n_si(probiotics))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# a — Shannon diversity by postnatal week, stratified by probiotic exposure
+# ══════════════════════════════════════════════════════════════════════════════
+plot_a <- phenos_imputed_div %>% filter(!is.na(Shannon), !is.na(probiotics), !is.na(week))
+
+stats_a <- purrr::map_dfr(levels(plot_a$week), function(w) {
+  d <- plot_a[plot_a$week == w, ]
+  g <- droplevels(d$probiotics); n <- table(g)
+  if (nlevels(g) < 2 || any(n < 3))
+    return(tibble(week = w, n_no = unname(n["No"]), n_yes = unname(n["Yes"]),
+                  p_value = NA_real_))
+  tibble(week = w, n_no = sum(g == "No"), n_yes = sum(g == "Yes"),
+         p_value = suppressWarnings(
+           stats::wilcox.test(d$Shannon ~ g, exact = FALSE)$p.value))
+})
+ok <- !is.na(stats_a$p_value)
+stats_a$p_adj <- NA_real_
+stats_a$p_adj[ok] <- stats::p.adjust(stats_a$p_value[ok], method = "BH")
+stats_a$significance <- cut(stats_a$p_adj, c(-Inf, .001, .01, .05, Inf),
+                            labels = c("***", "**", "*", ""), right = FALSE)
+stats_a <- left_join(stats_a,
+  plot_a %>% group_by(week) %>%
+    dplyr::summarise(label_y = max(Shannon, na.rm = TRUE) + 0.2, .groups = "drop"),
+  by = "week")
+
+p_a <- ggplot(plot_a, aes(week, Shannon, fill = probiotics, color = probiotics)) +
+  geom_boxplot(alpha = 0.4, outlier.colour = NA, position = position_dodge(width = 0.8)) +
+  geom_point(alpha = 0.6, position = position_jitterdodge(jitter.width = 0.3,
+                                                          jitter.height = 0,
+                                                          dodge.width = 0.8)) +
+  geom_text(data = subset(stats_a, !is.na(significance) & significance != ""),
+            aes(x = week, y = label_y, label = significance),
+            inherit.aes = FALSE, size = 5) +
+  scale_fill_manual(values = c(No = "#4a3aa7", Yes = "#1baf7a")) +
+  scale_color_manual(values = c(No = "#4a3aa7", Yes = "#1baf7a")) +
+  labs(x = "Postnatal week", y = "Shannon diversity index",
+       fill = "Probiotics", color = "Probiotics") +
+  theme_bw() +
+  theme(axis.title = element_text(color = "black", size = 16),
+        axis.text.y = element_text(size = 12),
+        axis.text.x = element_text(size = 12, angle = 60, hjust = 1),
+        legend.position = "bottom")
+print(p_a)
+ggsave("S2a_shannon_probiotics_week.pdf", p_a, width = 6, height = 5, dpi = 300)
+
+legend_out("Supp 2a — samples / infants per week and probiotic exposure",
+           plot_a %>% n_si(week, probiotics))
+legend_out("Supp 2a — per-week Wilcoxon (two-sided), BH across weeks tested",
+           stats_a %>% transmute(week, n_no, n_yes,
+                                 p_value = signif(p_value, 3), p_adj = signif(p_adj, 3)))
+legend_out("Supp 2a — overall LMM: Shannon ~ probiotics + age + reads + DNA conc + (1|infant)",
+           lmm_term(plot_a, "Shannon", "probiotics"))
+legend_out("Supp 2a — note",
+           "Shannon is computed AFTER removing the three probiotic species, so this is diversity of the remaining community.")
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# b — species associated with probiotic exposure (probiotic species excluded)
+# ══════════════════════════════════════════════════════════════════════════════
+# Reads the mixed-model screen produced by the Mixed Models notebook
+# (taxa_sp_mixed_all_nopbtx.txt): CLR abundance ~ sequencing depth +
+# DNA concentration + postnatal age + phenotype + (1|infant), likelihood-ratio
+# tests, BH correction across all species x phenotype tests in that file.
+MODEL_FILE <- "taxa_sp_mixed_all_nopbtx.txt"
+
+taxa_sp_mixed <- read.delim(MODEL_FILE)
+
+pbtx_results <- taxa_sp_mixed %>%
+  filter(Pheno == "probiotics", FDR < 0.05) %>%
+  group_by(Bug) %>% slice_min(order_by = FDR, with_ties = FALSE) %>% ungroup() %>%
+  mutate(label = pretty_species(Bug),
+         label = factor(label, levels = label[order(t.value)]),
+         direction = factor(ifelse(t.value > 0, "More", "Less"),
+                            levels = c("Less", "More")))
+
+p_b <- ggplot(pbtx_results, aes(label, t.value, fill = direction)) +
+  geom_col(colour = "black", width = 0.7) +
+  coord_flip() +
+  scale_fill_manual(values = alpha(c(Less = "#4a3aa7", More = "#1baf7a"), 0.9),
+                    labels = c(Less = "", More = "")) +
+  guides(fill = guide_legend(title = "Increased with probiotic exposure")) +
+  labs(x = NULL, y = "t-value") +
+  theme_bw() +
+  theme(axis.text.y = element_text(size = 12, face = "italic"),
+        axis.text.x = element_text(size = 12),
+        axis.title.x = element_text(size = 14),
+        legend.position = "bottom",
+        panel.grid.major.y = element_blank())
+print(p_b)
+ggsave("S2b_species_probiotics.pdf", p_b, width = 7, height = 7, dpi = 300)
+
+legend_out("Supp 2b — model file",
+           sprintf("%s | phenotypes: %d | species: %d | unique species x phenotype tests: %d | species tested for probiotics: %d",
+                   MODEL_FILE, dplyr::n_distinct(taxa_sp_mixed$Pheno),
+                   dplyr::n_distinct(taxa_sp_mixed$Bug),
+                   nrow(dplyr::distinct(taxa_sp_mixed, Bug, Pheno)),
+                   sum(taxa_sp_mixed$Pheno == "probiotics")))
+legend_out("Supp 2b — plotted species (FDR < 0.05); positive t = higher with probiotics",
+           pbtx_results %>% transmute(Bug, t.value = round(t.value, 2),
+                                      P = signif(P, 3), FDR = signif(FDR, 3)) %>%
+             arrange(desc(t.value)))
+legend_out("Supp 2b — counts",
+           sprintf("species shown: %d (%d higher, %d lower with probiotic exposure)",
+                   nrow(pbtx_results), sum(pbtx_results$t.value > 0),
+                   sum(pbtx_results$t.value < 0)))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# c — bacterial composition of the probiotic sachets
+# ══════════════════════════════════════════════════════════════════════════════
+# The sequenced product samples (SampleType == "probiotic"; P300_00_13H1/H2).
+# Relative abundances straight from MetaPhlAn, no filtering or transformation.
+MIN_PCT <- 0.1   # species below this in every sachet are pooled into "Other"
+
+prod_ids <- metadata$ID[trimws(as.character(metadata$SampleType)) == "probiotic"]
+prod_ids <- intersect(prod_ids, rownames(taxa_cleaned))
+stopifnot(length(prod_ids) > 0)
+
+sp_all <- taxa_cleaned[, grep("s__", colnames(taxa_cleaned)), drop = FALSE]
+sp_all <- sp_all[, !grepl("t__", colnames(sp_all)), drop = FALSE]
+colnames(sp_all) <- gsub(".*s__", "", colnames(sp_all))
+prod <- sp_all[prod_ids, , drop = FALSE] %>% mutate(across(everything(), as.numeric))
+
+legend_out("Supp 2c — sequenced probiotic product samples",
+           sprintf("n = %d samples: %s", length(prod_ids), paste(prod_ids, collapse = ", ")))
+
+prod_long <- prod %>%
+  tibble::rownames_to_column("sample") %>%
+  pivot_longer(-sample, names_to = "Species", values_to = "pct") %>%
+  filter(pct > 0)
+
+keep_sp <- prod_long %>% group_by(Species) %>%
+  dplyr::summarise(max_pct = max(pct), .groups = "drop") %>%
+  filter(max_pct >= MIN_PCT) %>% pull(Species)
+
+prod_plot <- prod_long %>%
+  mutate(Species = ifelse(Species %in% keep_sp, Species, "Other (<0.1%)")) %>%
+  group_by(sample, Species) %>%
+  dplyr::summarise(pct = sum(pct), .groups = "drop") %>%
+  mutate(label = ifelse(Species == "Other (<0.1%)", Species, pretty_species(Species)))
+
+sp_order <- prod_plot %>% group_by(label) %>%
+  dplyr::summarise(m = mean(pct), .groups = "drop") %>% arrange(desc(m)) %>% pull(label)
+sp_order <- c(setdiff(sp_order, "Other (<0.1%)"), intersect(sp_order, "Other (<0.1%)"))
+prod_plot$label <- factor(prod_plot$label, levels = rev(sp_order))
+
+p_c <- ggplot(prod_plot, aes(sample, pct, fill = label)) +
+  geom_col(colour = "grey20", linewidth = 0.2, width = 0.6) +
+  scale_fill_viridis_d(name = NULL, option = "D", direction = -1) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.02))) +
+  labs(x = NULL, y = "Relative abundance (%)") +
+  theme_classic(base_size = 11) +
+  theme(legend.text = element_text(face = "italic", size = 10),
+        legend.position = "right",
+        axis.text.x = element_text(size = 11))
+print(p_c)
+ggsave("S2c_probiotic_product_composition.pdf", p_c, width = 6, height = 4.5, dpi = 300)
+
+legend_out("Supp 2c — composition per sachet (% relative abundance, species > 0)",
+           prod_long %>% mutate(pct = round(pct, 3)) %>%
+             arrange(sample, desc(pct)) %>%
+             dplyr::rename(relative_abundance_pct = pct))
+legend_out("Supp 2c — species detected per sachet",
+           prod_long %>% group_by(sample) %>%
+             dplyr::summarise(n_species = dplyr::n(),
+                              top_species = Species[which.max(pct)],
+                              top_pct = round(max(pct), 2), .groups = "drop"))
+```
+
+```{r}
+# ══════════════════════════════════════════════════════════════════════════════
+# d — maternal gut microbiome: PCoA of Aitchison distances by delivery mode
+# ══════════════════════════════════════════════════════════════════════════════
+# Maternal samples only; one sample per mother, so no repeated-measures term.
+PREV_MIN_MOTHERS <- 5      # species detected above 0.01% in >= this many mothers
+PREV_ABUNDANCE   <- 0.01
+DELIVERY_COLS    <- c(Vaginal = "#ff7f0e", Caesarean = "#1f77b4")
+
+meta_m <- metadata %>% filter(trimws(as.character(SampleType)) == "maternal")
+rownames(meta_m) <- meta_m$ID
+
+sp_m <- sp_all[intersect(rownames(meta_m), rownames(sp_all)), , drop = FALSE] %>%
+  mutate(across(everything(), as.numeric))
+meta_m <- meta_m[rownames(sp_m), , drop = FALSE]
+
+meta_m$delivery <- factor(as.character(meta_m$delivery_md), levels = c("0", "1"),
+                          labels = c("Vaginal", "Caesarean"))
+meta_m <- meta_m[!is.na(meta_m$delivery), , drop = FALSE]
+sp_m   <- sp_m[rownames(meta_m), , drop = FALSE]
+for (v in c("Clean_reads_P1", "DNA_conc", "Sample_birth"))
+  if (v %in% colnames(meta_m)) meta_m[[v]] <- as.numeric(as.character(meta_m[[v]]))
+
+detected <- colSums(sp_m > PREV_ABUNDANCE, na.rm = TRUE)
+sp_m_keep <- sp_m[, detected >= PREV_MIN_MOTHERS, drop = FALSE]
+pseudo_m  <- min(sp_m_keep[sp_m_keep != 0]) / 2
+dist_m    <- vegdist(sp_m_keep, method = "aitchison", pseudocount = pseudo_m)
+
+pcoa_m <- cmdscale(dist_m, k = 2, eig = TRUE)
+var_m  <- round(pcoa_m$eig * 100 / sum(pcoa_m$eig), 2)
+pcoa_df <- as.data.frame(pcoa_m$points) %>% setNames(c("PC1", "PC2")) %>%
+  tibble::rownames_to_column(".sample") %>%
+  left_join(tibble(.sample = rownames(meta_m), delivery = meta_m$delivery),
+            by = ".sample")
+
+p_d <- ggplot(pcoa_df, aes(PC1, PC2, colour = delivery, fill = delivery)) +
+  geom_point(size = 2.4, alpha = 0.85) +
+  stat_ellipse(aes(group = delivery), type = "t", linetype = 2, geom = "path",
+               show.legend = FALSE) +
+  scale_colour_manual(name = "Delivery mode", values = DELIVERY_COLS) +
+  scale_fill_manual(name = "Delivery mode", values = DELIVERY_COLS) +
+  labs(x = paste0("PCo1 = ", var_m[1], "%"), y = paste0("PCo2 = ", var_m[2], "%")) +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "bottom", panel.grid = element_blank())
+
+p_d <- ggExtra::ggMarginal(p_d, type = "histogram", groupColour = FALSE,
+                           groupFill = TRUE,
+                           xparams = list(bins = 40, alpha = 0.8,
+                                          position = "identity", color = "white"),
+                           yparams = list(bins = 40, alpha = 0.8,
+                                          position = "identity", color = "white"))
+print(p_d)
+ggsave("S2d_maternal_PCoA_delivery.pdf", p_d, width = 5.5, height = 5, dpi = 300)
+
+# PERMANOVA, unadjusted and adjusted for the technical covariates
+covs_m <- intersect(c("Clean_reads_P1", "DNA_conc"), colnames(meta_m))
+fit_perm <- function(covs, label) {
+  keep <- stats::complete.cases(meta_m[, c("delivery", covs), drop = FALSE])
+  d <- meta_m[keep, , drop = FALSE]
+  dm <- as.dist(as.matrix(dist_m)[rownames(d), rownames(d)])
+  set.seed(42)
+  ad <- adonis2(stats::as.formula(paste("dm ~", paste(c(covs, "delivery"), collapse = " + "))),
+                data = d, permutations = 10000, by = "margin")
+  sprintf("%s: n = %d mothers | R2 = %.4f | F = %.2f | p = %.3g",
+          label, nrow(d), ad["delivery", "R2"], ad["delivery", "F"],
+          ad["delivery", "Pr(>F)"])
+}
+legend_out("Supp 2d — maternal samples by delivery mode",
+           meta_m %>% dplyr::count(delivery, name = "n_mothers"))
+legend_out("Supp 2d — PERMANOVA, delivery mode (10,000 permutations, marginal SS)",
+           c(fit_perm(character(0), "unadjusted"),
+             fit_perm(covs_m, "+ sequencing depth + DNA concentration")))
+legend_out("Supp 2d — species in the maternal distance",
+           sprintf("%d of %d species (detected above %.2f%% in >= %d mothers) | PCo1 %.2f%%, PCo2 %.2f%%",
+                   ncol(sp_m_keep), ncol(sp_m), PREV_ABUNDANCE, PREV_MIN_MOTHERS,
+                   var_m[1], var_m[2]))
+
+# PERMANOVA cannot separate a shift in location from a difference in spread, so
+# the dispersion test is reported alongside it.
+bd <- betadisper(dist_m, meta_m$delivery)
+set.seed(42)
+bd_p <- permutest(bd, permutations = 10000)$tab[1, "Pr(>F)"]
+legend_out("Supp 2d — multivariate dispersion (betadisper / PERMDISP)",
+           sprintf("p = %.3g | mean distance to centroid: vaginal %.2f, caesarean %.2f",
+                   bd_p, mean(bd$distances[meta_m$delivery == "Vaginal"]),
+                   mean(bd$distances[meta_m$delivery == "Caesarean"])))
+
+cat("\n✓ Saved: S2a-S2d PDFs and ", LEGEND_FILE, "\n", sep = "")
+sessionInfo()
+```
